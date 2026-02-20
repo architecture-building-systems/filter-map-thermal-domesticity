@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Bivariate Filter Map</title>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Comfortaa:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css', v='20260220r') }}" />
+</head>
+<body>
+  <main id="map"></main>
+
+  <section id="hover-pill-row" class="hidden" aria-label="Layer options and legends"></section>
+
+  <aside id="right-stack" aria-label="Map controls">
+    <section id="control-pill" aria-label="Control center">
+      <h1>Filter Map</h1>
+
+      <div class="group">
+        <h2>Layers</h2>
+        <p class="layer-order-help">Drag to reorder (top is topmost).</p>
+        <div id="layer-order-list" class="layer-order-list" aria-label="Layer controls"></div>
+      </div>
+
+      <div class="group two-col">
+        <label>
+          Season
+          <select id="season">
+            <option value="annual">Annual</option>
+            <option value="winter">Winter</option>
+          </select>
+        </label>
+        <label>
+          Temperature layer
+          <select id="temp-method">
+            <option value="mean-mean">mean-mean</option>
+            <option value="mean-range">mean-range</option>
+            <option value="mean-min">mean-min</option>
+            <option value="mean-max">mean-max</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="group">
+        <h2>Heating Exclusions</h2>
+        <div id="heating-list" class="heating-list"></div>
+      </div>
+
+      <div class="group two-col">
+        <label>
+          <span class="label-with-info">
+            Cold k_temp
+            <button type="button" class="info-icon" aria-label="k_temp explanation">
+              i
+              <span class="info-tooltip">
+                k_temp controls the cold cutoff:
+                <strong>temp_cutoff = mean_temp - (k_temp x std_temp)</strong>.
+                Higher k_temp makes the cutoff colder (stricter), so fewer municipalities are flagged.
+              </span>
+            </button>
+          </span>
+          <input id="k-temp" type="number" step="0.1" min="0" value="1.0" />
+        </label>
+        <label>
+          <span class="label-with-info">
+            Old k_old
+            <button type="button" class="info-icon" aria-label="k_old explanation">
+              i
+              <span class="info-tooltip">
+                k_old controls the old-building cutoff:
+                <strong>old_cutoff = mean_old + (k_old x std_old)</strong>.
+                Higher k_old raises the required old-building percentage (stricter), so fewer municipalities are flagged.
+              </span>
+            </button>
+          </span>
+          <input id="k-old" type="number" step="0.1" min="0" value="1.0" />
+        </label>
+      </div>
+
+      <div class="group">
+        <label><input id="non-habitable" type="checkbox" checked /> Exclude non-habitable areas</label>
+        <label><input id="auto-update" type="checkbox" checked /> Auto-update</label>
+      </div>
+
+      <div class="group actions">
+        <button id="btn-update" type="button">Update map</button>
+        <p id="status">Loading data ...</p>
+      </div>
+    </section>
+  </aside>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="{{ url_for('static', filename='app.js', v='20260220s') }}"></script>
+</body>
+</html>
