@@ -36,6 +36,8 @@ const ACCENT = "#FBD124";
 const FALLBACK_FILL = "#bdbdbd";
 const ISOS_DEFAULT_LAYER_COLOR = "#707070";
 const ISOS_DETAIL_ZOOM = 12;
+const ISOS_MARKER_FILL = "#ffffff";
+const ISOS_MARKER_STROKE = "#111111";
 const WHITE_FILL = "#ffffff";
 const SVG_NS = "http://www.w3.org/2000/svg";
 
@@ -440,11 +442,11 @@ function normalizeMarkerSize(props) {
 
 function mapMarkerSizeToPixels(sizeValue) {
   const n = Number(sizeValue);
-  if (!Number.isFinite(n)) return 5.5;
-  if (n <= 20) return 4.5;
-  if (n <= 40) return 5.5;
-  if (n <= 60) return 6.5;
-  return 7.5;
+  if (!Number.isFinite(n)) return 4.6;
+  if (n <= 20) return 3.8;
+  if (n <= 40) return 4.6;
+  if (n <= 60) return 5.4;
+  return 6.2;
 }
 
 function polygonPoints(cx, cy, radius, sides, rotationDeg = 0) {
@@ -459,7 +461,7 @@ function polygonPoints(cx, cy, radius, sides, rotationDeg = 0) {
   return pts.join(" ");
 }
 
-function buildIsosSvg(markerCode, pixelRadius, layerColor, clickable) {
+function buildIsosSvg(markerCode, pixelRadius, layerColor, clickable, strokeColor = ISOS_MARKER_STROKE) {
   const center = 12;
   const strokeWidth = 1.4;
   const fillColor = layerColor || ISOS_DEFAULT_LAYER_COLOR;
@@ -467,31 +469,31 @@ function buildIsosSvg(markerCode, pixelRadius, layerColor, clickable) {
   let shapeMarkup = "";
 
   if (markerCode === "o") {
-    shapeMarkup = `<circle class="isos-fill" cx="${center}" cy="${center}" r="${pixelRadius.toFixed(2)}" fill="${fillColor}" stroke="#111111" stroke-width="${strokeWidth}" />`;
+    shapeMarkup = `<circle class="isos-fill" cx="${center}" cy="${center}" r="${pixelRadius.toFixed(2)}" fill="${fillColor}" stroke="${strokeColor}" stroke-width="${strokeWidth}" />`;
   } else if (markerCode === "s") {
     const d = pixelRadius * 2;
     const x = center - pixelRadius;
     const y = center - pixelRadius;
-    shapeMarkup = `<rect class="isos-fill" x="${x.toFixed(2)}" y="${y.toFixed(2)}" width="${d.toFixed(2)}" height="${d.toFixed(2)}" fill="${fillColor}" stroke="#111111" stroke-width="${strokeWidth}" />`;
+    shapeMarkup = `<rect class="isos-fill" x="${x.toFixed(2)}" y="${y.toFixed(2)}" width="${d.toFixed(2)}" height="${d.toFixed(2)}" fill="${fillColor}" stroke="${strokeColor}" stroke-width="${strokeWidth}" />`;
   } else if (markerCode === "^") {
     const p1 = `${center.toFixed(2)},${(center - pixelRadius).toFixed(2)}`;
     const p2 = `${(center - pixelRadius).toFixed(2)},${(center + pixelRadius).toFixed(2)}`;
     const p3 = `${(center + pixelRadius).toFixed(2)},${(center + pixelRadius).toFixed(2)}`;
-    shapeMarkup = `<polygon class="isos-fill" points="${p1} ${p2} ${p3}" fill="${fillColor}" stroke="#111111" stroke-width="${strokeWidth}" />`;
+    shapeMarkup = `<polygon class="isos-fill" points="${p1} ${p2} ${p3}" fill="${fillColor}" stroke="${strokeColor}" stroke-width="${strokeWidth}" />`;
   } else if (markerCode === "v") {
     const p1 = `${(center - pixelRadius).toFixed(2)},${(center - pixelRadius).toFixed(2)}`;
     const p2 = `${(center + pixelRadius).toFixed(2)},${(center - pixelRadius).toFixed(2)}`;
     const p3 = `${center.toFixed(2)},${(center + pixelRadius).toFixed(2)}`;
-    shapeMarkup = `<polygon class="isos-fill" points="${p1} ${p2} ${p3}" fill="${fillColor}" stroke="#111111" stroke-width="${strokeWidth}" />`;
+    shapeMarkup = `<polygon class="isos-fill" points="${p1} ${p2} ${p3}" fill="${fillColor}" stroke="${strokeColor}" stroke-width="${strokeWidth}" />`;
   } else if (markerCode === "D") {
-    shapeMarkup = `<polygon class="isos-fill" points="${polygonPoints(center, center, pixelRadius, 4, -45)}" fill="${fillColor}" stroke="#111111" stroke-width="${strokeWidth}" />`;
+    shapeMarkup = `<polygon class="isos-fill" points="${polygonPoints(center, center, pixelRadius, 4, -45)}" fill="${fillColor}" stroke="${strokeColor}" stroke-width="${strokeWidth}" />`;
   } else if (markerCode === "p") {
-    shapeMarkup = `<polygon class="isos-fill" points="${polygonPoints(center, center, pixelRadius, 5, -90)}" fill="${fillColor}" stroke="#111111" stroke-width="${strokeWidth}" />`;
+    shapeMarkup = `<polygon class="isos-fill" points="${polygonPoints(center, center, pixelRadius, 5, -90)}" fill="${fillColor}" stroke="${strokeColor}" stroke-width="${strokeWidth}" />`;
   } else {
     const r = pixelRadius * 0.85;
     shapeMarkup = `
-      <line class="isos-line" x1="${(center - r).toFixed(2)}" y1="${(center - r).toFixed(2)}" x2="${(center + r).toFixed(2)}" y2="${(center + r).toFixed(2)}" stroke="${fillColor}" stroke-width="${strokeWidth}" />
-      <line class="isos-line" x1="${(center + r).toFixed(2)}" y1="${(center - r).toFixed(2)}" x2="${(center - r).toFixed(2)}" y2="${(center + r).toFixed(2)}" stroke="${fillColor}" stroke-width="${strokeWidth}" />
+      <line class="isos-line" x1="${(center - r).toFixed(2)}" y1="${(center - r).toFixed(2)}" x2="${(center + r).toFixed(2)}" y2="${(center + r).toFixed(2)}" stroke="${strokeColor}" stroke-width="${strokeWidth}" />
+      <line class="isos-line" x1="${(center + r).toFixed(2)}" y1="${(center - r).toFixed(2)}" x2="${(center - r).toFixed(2)}" y2="${(center + r).toFixed(2)}" stroke="${strokeColor}" stroke-width="${strokeWidth}" />
     `;
   }
 
@@ -512,17 +514,17 @@ function resolveIsosLayerColor(layerName) {
   return state.isosLayerColorMap[key];
 }
 
-function getIsosIcon(markerCode, markerSize, layerColor, clickable) {
+function getIsosIcon(markerCode, markerSize, layerColor, clickable, strokeColor = ISOS_MARKER_STROKE) {
   const px = mapMarkerSizeToPixels(markerSize);
-  const key = `${markerCode}|${px}|${layerColor}|${clickable ? "1" : "0"}`;
+  const key = `${markerCode}|${px}|${layerColor}|${strokeColor}|${clickable ? "1" : "0"}`;
   if (state.isosIconCache[key]) {
     return state.isosIconCache[key];
   }
 
-  const iconPx = px + 8;
+  const iconPx = px + 6;
   state.isosIconCache[key] = L.divIcon({
     className: clickable ? "isos-icon-wrapper isos-url-marker" : "isos-icon-wrapper isos-static-marker",
-    html: buildIsosSvg(markerCode, px, layerColor, clickable),
+    html: buildIsosSvg(markerCode, px, layerColor, clickable, strokeColor),
     iconSize: [iconPx, iconPx],
     iconAnchor: [iconPx / 2, iconPx / 2],
     tooltipAnchor: [0, -Math.round(iconPx / 2)],
@@ -1101,7 +1103,6 @@ function createIsosLayer(geojson, mode = "symbol") {
     pointToLayer: (feature, latlng) => {
       const props = feature?.properties || {};
       const markerSize = normalizeMarkerSize(props);
-      const layerColor = resolveIsosLayerColor(props.layer);
       const clickable = isSafeHttpUrl(props.url);
 
       if (mode === "simple") {
@@ -1109,16 +1110,16 @@ function createIsosLayer(geojson, mode = "symbol") {
           pane: paneName,
           interactive: true,
           bubblingMouseEvents: false,
-          radius: Math.max(2.4, mapMarkerSizeToPixels(markerSize) - 1.4),
-          color: layerColor,
+          radius: Math.max(1.9, mapMarkerSizeToPixels(markerSize) - 1.5),
+          color: ISOS_MARKER_STROKE,
           weight: 1.1,
-          fillColor: layerColor,
-          fillOpacity: 0.82,
+          fillColor: ISOS_MARKER_FILL,
+          fillOpacity: 0.97,
         });
       }
 
       const markerCode = normalizeMarkerCode(props);
-      const icon = getIsosIcon(markerCode, markerSize, layerColor, clickable);
+      const icon = getIsosIcon(markerCode, markerSize, ISOS_MARKER_FILL, clickable, ISOS_MARKER_STROKE);
       return L.marker(latlng, {
         pane: paneName,
         interactive: true,
