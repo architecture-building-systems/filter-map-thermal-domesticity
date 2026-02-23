@@ -10,9 +10,19 @@
   <link href="https://fonts.googleapis.com/css2?family=Comfortaa:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-  <link rel="stylesheet" href="{{ url_for('static', filename='app.css', v='20260220r') }}" />
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css', v='20260223a') }}" />
 </head>
 <body>
+  <div id="app-loader" class="is-visible" role="status" aria-live="polite" aria-label="Application loading">
+    <div class="app-loader-card">
+      <div class="app-loader-spinner" aria-hidden="true"></div>
+      <h2 id="app-loader-stage">Starting map</h2>
+      <p id="app-loader-detail">Preparing application...</p>
+      <p id="app-loader-hint" class="hidden"></p>
+      <button id="app-loader-retry" class="hidden" type="button">Retry</button>
+    </div>
+  </div>
+
   <main id="map"></main>
 
   <section id="hover-pill-row" class="hidden" aria-label="Layer options and legends"></section>
@@ -95,6 +105,6 @@
   </aside>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <script src="{{ url_for('static', filename='app.js', v='20260220s') }}"></script>
+  <script src="{{ url_for('static', filename='app.js', v='20260223a') }}"></script>
 </body>
 </html>

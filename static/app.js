@@ -9,6 +9,11 @@ const state = {
   layerVisibility: {},
   layerOpacity: {},
   layerInstances: {},
+  overlayManifest: {},
+  overlayData: {},
+  overlayDataLoaded: {},
+  overlayFetchInFlight: {},
+  layerLoadErrors: {},
   layerPaneZBase: 390,
   debounceHandle: null,
   hoverSchemas: {},
@@ -22,6 +27,7 @@ const state = {
   isosRenderMode: "symbol",
   isosZoomSettleHandle: null,
   isZoomingMap: false,
+  bootHintTimer: null,
   bioregionColorMap: {},
   bioregionOrder: [],
   bioregionPatternReady: false,
@@ -180,11 +186,49 @@ const el = {
   heatingList: document.getElementById("heating-list"),
   updateBtn: document.getElementById("btn-update"),
   hoverPillRow: document.getElementById("hover-pill-row"),
+  appLoader: document.getElementById("app-loader"),
+  loaderStage: document.getElementById("app-loader-stage"),
+  loaderDetail: document.getElementById("app-loader-detail"),
+  loaderHint: document.getElementById("app-loader-hint"),
+  loaderRetry: document.getElementById("app-loader-retry"),
 };
 
 function setStatus(msg) {
   const warning = state.healthWarning ? ` | ${state.healthWarning}` : "";
   el.status.textContent = `${msg}${warning}`;
+}
+
+function setLoaderStage(stage, detail = "") {
+  if (!el.appLoader) return;
+  el.appLoader.classList.remove("is-hidden");
+  if (el.loaderStage) el.loaderStage.textContent = String(stage || "Loading");
+  if (el.loaderDetail) el.loaderDetail.textContent = String(detail || "");
+}
+
+function setLoaderHint(text = "") {
+  if (!el.loaderHint) return;
+  if (text) {
+    el.loaderHint.textContent = text;
+    el.loaderHint.classList.remove("hidden");
+  } else {
+    el.loaderHint.textContent = "";
+    el.loaderHint.classList.add("hidden");
+  }
+}
+
+function showLoaderError(message) {
+  setLoaderStage("Startup error", message || "Unexpected error while starting the map.");
+  setLoaderHint("Use Retry after checking server logs or network status.");
+  if (el.loaderRetry) el.loaderRetry.classList.remove("hidden");
+}
+
+function hideLoader() {
+  if (!el.appLoader) return;
+  el.appLoader.classList.add("is-hidden");
+}
+
+function overlayGeojson(layerId) {
+  return state.overlayData?.[layerId] || state.bootstrap?.overlays?.[layerId] || null;
 }
 
 function debounce(fn, ms = 350) {
@@ -291,7 +335,7 @@ function bioregionKeyFromProps(props) {
 function buildBioregionColorMap() {
   state.bioregionColorMap = {};
   state.bioregionOrder = [];
-  const features = state.bootstrap?.overlays?.bioregions?.features || [];
+  const features = overlayGeojson("bioregions")?.features || [];
   features.forEach((feature) => {
     const key = bioregionKeyFromProps(feature?.properties || {});
     if (state.bioregionColorMap[key]) return;
@@ -547,7 +591,11 @@ function layerHasData(layerId) {
     return !!state.bootstrap?.raster_overlays?.[layerId];
   }
   if (kind === "vector") {
-    return !!(state.bootstrap?.overlays?.[layerId]?.features || []).length;
+    const manifestCount = Number(state.overlayManifest?.[layerId]?.feature_count);
+    if (Number.isFinite(manifestCount) && manifestCount >= 0) {
+      return manifestCount > 0;
+    }
+    return !!(overlayGeojson(layerId)?.features || []).length;
   }
   return false;
 }
@@ -643,6 +691,7 @@ function renderLayerOrderControls() {
   const rows = state.layerOrder
     .map((layerId) => {
       const meta = LAYER_META[layerId] || { label: formatRawFieldLabel(layerId) };
+      const kind = meta.kind;
       const available = layerHasData(layerId);
       const checked = available && !!state.layerVisibility[layerId];
       const checkedAttr = checked ? " checked" : "";
@@ -650,12 +699,18 @@ function renderLayerOrderControls() {
       const unavailableClass = available ? "" : " is-unavailable";
       const draggableAttr = available ? "true" : "false";
       const unavailableTitle = available ? "" : " title=\"Data unavailable\"";
+      const isLoading = kind === "vector" && !!state.overlayFetchInFlight[layerId];
+      const hasError = kind === "vector" && !!state.layerLoadErrors[layerId];
+      const stateBadge = isLoading
+        ? "<span class=\"layer-order-state\">loading</span>"
+        : (hasError ? "<span class=\"layer-order-state is-error\">error</span>" : "");
       return `
         <div class="layer-order-pill${unavailableClass}" data-layer-id="${escapeHtml(layerId)}" draggable="${draggableAttr}"${unavailableTitle}>
           <label class="layer-order-check">
             <input type="checkbox" data-layer-visible="${escapeHtml(layerId)}"${checkedAttr}${disabledAttr}>
             <span>${escapeHtml(meta.label)}</span>
           </label>
+          ${stateBadge}
           <span class="layer-order-handle" aria-hidden="true">⋮⋮</span>
         </div>
       `;
@@ -844,11 +899,11 @@ function setLayerSchema(layerKey, keys) {
 
 function refreshHoverSchema(layerKey) {
   if (layerKey === "isos") {
-    setLayerSchema("isos", collectPropertyKeys(state.bootstrap?.overlays?.isos));
+    setLayerSchema("isos", collectPropertyKeys(overlayGeojson("isos")));
     return;
   }
   if (layerKey === "bioregions") {
-    setLayerSchema("bioregions", collectPropertyKeys(state.bootstrap?.overlays?.bioregions));
+    setLayerSchema("bioregions", collectPropertyKeys(overlayGeojson("bioregions")));
     return;
   }
 
@@ -866,6 +921,15 @@ function getVisibleStackLayers() {
 function layerMainOptionsMarkup(layerId) {
   const meta = LAYER_META[layerId];
   if (meta?.hoverable) {
+    if (layerId !== "bivariate_municipalities" && !state.overlayDataLoaded[layerId]) {
+      if (state.layerLoadErrors[layerId]) {
+        return `<p class="layer-option-placeholder">Failed to load layer fields. Toggle layer on again to retry.</p>`;
+      }
+      if (state.overlayFetchInFlight[layerId]) {
+        return `<p class="layer-option-placeholder">Loading layer fields ...</p>`;
+      }
+      return `<p class="layer-option-placeholder">Enable this layer to load hover fields.</p>`;
+    }
     const schema = state.hoverSchemas[layerId] || [];
     const selected = state.hoverSelectedFields[layerId] || new Set();
     const fieldsHtml = schema.length
@@ -1145,7 +1209,8 @@ function createIsosLayer(geojson, mode = "symbol") {
 }
 
 function maybeRefreshIsosRenderMode(forcedMode = null) {
-  if (!state.map || !state.bootstrap?.overlays?.isos || !state.layerInstances.isos) return;
+  const isosGeo = overlayGeojson("isos");
+  if (!state.map || !isosGeo || !state.layerInstances.isos) return;
   const desiredMode = forcedMode || currentIsosRenderMode();
   if (state.isZoomingMap && !forcedMode && desiredMode === "symbol") return;
   if (desiredMode === state.isosRenderMode) return;
@@ -1156,7 +1221,7 @@ function maybeRefreshIsosRenderMode(forcedMode = null) {
     state.map.removeLayer(oldLayer);
   }
 
-  state.layerInstances.isos = createIsosLayer(state.bootstrap.overlays.isos, desiredMode);
+  state.layerInstances.isos = createIsosLayer(isosGeo, desiredMode);
   state.isosRenderMode = desiredMode;
 
   if (wasVisible && state.layerVisibility.isos) {
@@ -1228,6 +1293,54 @@ function createVectorLayer(kind, geojson) {
   });
 }
 
+async function ensureOverlayLoaded(layerId) {
+  if (LAYER_META[layerId]?.kind !== "vector") return;
+  if (state.overlayDataLoaded[layerId]) return;
+  if (!layerHasData(layerId)) return;
+  if (state.overlayFetchInFlight[layerId]) {
+    return state.overlayFetchInFlight[layerId];
+  }
+
+  const url = String(
+    state.overlayManifest?.[layerId]?.url
+    || `/api/overlay/${encodeURIComponent(layerId)}`,
+  );
+  const label = LAYER_META[layerId]?.label || formatRawFieldLabel(layerId);
+  state.layerLoadErrors[layerId] = null;
+
+  const promise = (async () => {
+    setStatus(`Loading ${label} layer ...`);
+    const geojson = await fetchJson(url);
+    state.overlayData[layerId] = geojson;
+    state.overlayDataLoaded[layerId] = true;
+    state.layerInstances[layerId] = createVectorLayer(layerId, geojson);
+
+    if (layerId === "isos") {
+      refreshHoverSchema("isos");
+      buildIsosLayerColorMap();
+      state.isosIconCache = {};
+      state.isosRenderMode = currentIsosRenderMode();
+    } else if (layerId === "bioregions") {
+      buildBioregionColorMap();
+      refreshHoverSchema("bioregions");
+    }
+  })()
+    .catch((err) => {
+      state.layerLoadErrors[layerId] = String(err.message || err || "Unknown error");
+      state.layerVisibility[layerId] = false;
+      throw err;
+    })
+    .finally(() => {
+      state.overlayFetchInFlight[layerId] = null;
+      renderLayerOrderControls();
+      applyLayerOrderAndVisibility();
+    });
+
+  state.overlayFetchInFlight[layerId] = promise;
+  renderLayerOrderControls();
+  return promise;
+}
+
 function initializeLayerInstances() {
   state.layerInstances = {};
   state.layerOrder.forEach((layerId) => {
@@ -1238,7 +1351,7 @@ function initializeLayerInstances() {
       return;
     }
     if (kind === "vector") {
-      state.layerInstances[layerId] = createVectorLayer(layerId, state.bootstrap?.overlays?.[layerId]);
+      state.layerInstances[layerId] = createVectorLayer(layerId, overlayGeojson(layerId));
       return;
     }
     state.layerInstances[layerId] = null;
@@ -1369,7 +1482,7 @@ function renderExceptionalPlaces(listNode = null, countNode = null) {
 
 function buildIsosLayerColorMap() {
   state.isosLayerColorMap = {};
-  const features = state.bootstrap?.overlays?.isos?.features || [];
+  const features = overlayGeojson("isos")?.features || [];
   features.forEach((feature) => {
     const layerName = String(feature?.properties?.layer ?? "").trim() || "Unknown";
     resolveIsosLayerColor(layerName);
@@ -1379,8 +1492,16 @@ function buildIsosLayerColorMap() {
 function renderIsosLegend(targetNode = null) {
   const mount = targetNode;
   if (!mount) return;
+  if (!state.overlayDataLoaded.isos) {
+    if (state.layerLoadErrors.isos) {
+      mount.innerHTML = "<p class=\"layer-option-placeholder\">Unable to load ISOS legend.</p>";
+      return;
+    }
+    mount.innerHTML = "<p class=\"layer-option-placeholder\">Loading ISOS legend ...</p>";
+    return;
+  }
 
-  const features = state.bootstrap?.overlays?.isos?.features || [];
+  const features = overlayGeojson("isos")?.features || [];
   if (features.length === 0) {
     mount.innerHTML = "";
     return;
@@ -1441,8 +1562,16 @@ function renderIsosLegend(targetNode = null) {
 function renderBioregionLegend(targetNode = null) {
   const mount = targetNode;
   if (!mount) return;
+  if (!state.overlayDataLoaded.bioregions) {
+    if (state.layerLoadErrors.bioregions) {
+      mount.innerHTML = "<p class=\"layer-option-placeholder\">Unable to load bioregion legend.</p>";
+      return;
+    }
+    mount.innerHTML = "<p class=\"layer-option-placeholder\">Loading bioregion legend ...</p>";
+    return;
+  }
 
-  const features = state.bootstrap?.overlays?.bioregions?.features || [];
+  const features = overlayGeojson("bioregions")?.features || [];
   if (features.length === 0) {
     mount.innerHTML = "";
     return;
@@ -1527,9 +1656,17 @@ function applyLayerOrderAndVisibility() {
   applyLayerPaneOrder();
 
   state.layerOrder.forEach((layerId) => {
+    const kind = LAYER_META[layerId]?.kind;
+    const shouldShow = !!state.layerVisibility[layerId];
+    if (kind === "vector" && shouldShow && !state.overlayDataLoaded[layerId]) {
+      ensureOverlayLoaded(layerId).catch((err) => {
+        setStatus(`Failed loading ${LAYER_META[layerId]?.label || layerId}: ${err.message}`);
+      });
+      return;
+    }
+
     const layer = getLayerInstance(layerId);
     if (!layer) return;
-    const shouldShow = !!state.layerVisibility[layerId];
     const has = state.map.hasLayer(layer);
     if (shouldShow && !has) {
       layer.addTo(state.map);
@@ -1609,6 +1746,14 @@ function initMap() {
 
 async function fetchJson(url, options = undefined) {
   const response = await fetch(url, options);
+  if (response.status === 304) {
+    const retry = await fetch(url, { ...(options || {}), cache: "force-cache" });
+    if (!retry.ok) {
+      const text = await retry.text();
+      throw new Error(`${retry.status} ${retry.statusText}: ${text}`);
+    }
+    return retry.json();
+  }
   if (!response.ok) {
     const text = await response.text();
     throw new Error(`${response.status} ${response.statusText}: ${text}`);
@@ -1630,6 +1775,7 @@ async function waitUntilReady(maxMs = 180000, intervalMs = 1000) {
       if (h.ready) {
         return;
       }
+      setLoaderStage("Preparing datasets", "Building server-side caches ...");
       setStatus("Loading datasets ...");
     } catch (err) {
       if (String(err.message || "").length > 0 && !String(err.message).includes("503")) {
@@ -1641,7 +1787,7 @@ async function waitUntilReady(maxMs = 180000, intervalMs = 1000) {
   throw new Error("Startup timeout while waiting for data loading");
 }
 
-async function recompute(isInitial = false) {
+async function recompute(isInitial = false, rethrowOnError = false) {
   try {
     setStatus("Updating map ...");
     const payload = currentPayload();
@@ -1670,6 +1816,9 @@ async function recompute(isInitial = false) {
   } catch (err) {
     setStatus(`Error: ${err.message}`);
     console.error(err);
+    if (rethrowOnError) {
+      throw err;
+    }
   }
 }
 
@@ -1689,14 +1838,47 @@ function wireAutoUpdateEvents() {
 }
 
 async function boot() {
+  if (el.loaderRetry) {
+    el.loaderRetry.classList.add("hidden");
+    el.loaderRetry.addEventListener("click", () => window.location.reload());
+  }
+  setLoaderHint("");
+
   try {
+    setLoaderStage("Checking server", "Contacting backend ...");
+    state.bootHintTimer = setTimeout(() => {
+      setLoaderHint("Still preparing data. First cold start can take a while on PythonAnywhere.");
+    }, 10000);
+
     setStatus("Checking server ...");
     await waitUntilReady();
+    setLoaderStage("Loading core map", "Fetching bootstrap payload ...");
     setStatus("Loading bootstrap data ...");
     state.bootstrap = await fetchJson("/api/bootstrap");
 
     const defaults = state.bootstrap.controls?.defaults || {};
     const options = state.bootstrap.controls || {};
+    state.overlayManifest = state.bootstrap.overlay_manifest || {};
+    state.overlayData = {};
+    state.overlayDataLoaded = {};
+    state.overlayFetchInFlight = {};
+    state.layerLoadErrors = {};
+
+    const preloadedOverlays = state.bootstrap.overlays || {};
+    Object.keys(LAYER_META).forEach((layerId) => {
+      if (LAYER_META[layerId]?.kind !== "vector") return;
+      const payload = preloadedOverlays[layerId];
+      const hasFeatures = !!(payload?.features && Array.isArray(payload.features) && payload.features.length > 0);
+      if (hasFeatures) {
+        state.overlayData[layerId] = payload;
+        state.overlayDataLoaded[layerId] = true;
+      } else {
+        state.overlayDataLoaded[layerId] = false;
+      }
+      state.overlayFetchInFlight[layerId] = null;
+      state.layerLoadErrors[layerId] = null;
+    });
+
     state.layerOrder = sanitizeLayerOrder(defaults.layer_order || LAYER_DEFAULT_ORDER);
     state.layerVisibility = defaultLayerVisibility(defaults);
     sanitizeLayerVisibility();
@@ -1719,10 +1901,14 @@ async function boot() {
 
     initHeatingControls(options.heating_options || [], defaults.excluded_heating_types || []);
 
-    refreshHoverSchema("isos");
-    refreshHoverSchema("bioregions");
-    buildIsosLayerColorMap();
-    buildBioregionColorMap();
+    if (state.overlayDataLoaded.isos) {
+      refreshHoverSchema("isos");
+      buildIsosLayerColorMap();
+    }
+    if (state.overlayDataLoaded.bioregions) {
+      refreshHoverSchema("bioregions");
+      buildBioregionColorMap();
+    }
     state.isosIconCache = {};
     state.isosRenderMode = currentIsosRenderMode();
     ensureLayerOpacityDefaults();
@@ -1732,10 +1918,21 @@ async function boot() {
     applyLayerOrderAndVisibility();
     wireAutoUpdateEvents();
 
-    await recompute(true);
+    setLoaderStage("Computing bivariate classes", "Calculating initial map values ...");
+    await recompute(true, true);
+
+    setLoaderStage("Ready", "Map loaded.");
+    setLoaderHint("");
+    hideLoader();
   } catch (err) {
     setStatus(`Bootstrap error: ${err.message}`);
+    showLoaderError(String(err.message || err));
     console.error(err);
+  } finally {
+    if (state.bootHintTimer) {
+      clearTimeout(state.bootHintTimer);
+      state.bootHintTimer = null;
+    }
   }
 }
 

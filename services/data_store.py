@@ -82,7 +82,11 @@ class DataStore:
         self.proposal_dir = base_dir.parent
 
         self.ready = False
+        self.bootstrap_core_payload: dict = {}
         self.bootstrap_payload: dict = {}
+        self.overlay_specs: dict[str, dict] = {}
+        self.overlay_payloads: dict[str, dict] = {}
+        self.overlay_manifest: dict[str, dict] = {}
         self.metadata_by_bfs: dict[str, dict] = {}
         self.temperature_cache: dict[tuple[str, str, bool], dict[str, float]] = {}
         self.heating_records: dict[str, HeatingAgeRecord] = {}
@@ -120,8 +124,13 @@ class DataStore:
         self._precompute_temperature_aggregates()
         self._load_heating_records()
         self._build_raster_overlays()
+        self.overlay_specs = self._build_overlay_specs()
+        self.overlay_payloads = {}
+        self.overlay_manifest = self._build_overlay_manifest(self.overlay_specs)
 
-        self.bootstrap_payload = self._build_bootstrap_payload(muni_gdf)
+        self.bootstrap_core_payload = self._build_bootstrap_payload(muni_gdf)
+        # Backward-compatible alias used by current API handler.
+        self.bootstrap_payload = self.bootstrap_core_payload
         self.ready = True
 
     def _build_metadata(self, gdf: gpd.GeoDataFrame) -> dict[str, dict]:
@@ -330,6 +339,77 @@ class DataStore:
                 out[col] = series.map(_clean)
         return out
 
+    def _build_overlay_specs(self) -> dict[str, dict]:
+        return {
+            "national_border": {
+                "label": "National border",
+                "path": self.background_dir / "01_swiss_national_border.geojson",
+                "simplify_tolerance": 0.0005,
+                "keep_columns": None,
+                "hoverable": False,
+            },
+            "cantons": {
+                "label": "Cantons",
+                "path": self.background_dir / "02_swiss_cantons.geojson",
+                "simplify_tolerance": 0.001,
+                "keep_columns": None,
+                "hoverable": False,
+            },
+            "bioregions": {
+                "label": "Bioregions",
+                "path": self.background_dir / "04_swiss_bioregions.geojson",
+                "simplify_tolerance": 0.001,
+                "keep_columns": ["DEBioBedeu", "RegionName"],
+                "hoverable": True,
+            },
+            "isos": {
+                "label": "ISOS",
+                "path": self._resolve_isos_path(),
+                "simplify_tolerance": 0.0,
+                "keep_columns": None,
+                "hoverable": True,
+            },
+        }
+
+    def _build_overlay_manifest(self, overlay_specs: dict[str, dict]) -> dict[str, dict]:
+        out: dict[str, dict] = {}
+        for layer_id, spec in overlay_specs.items():
+            path = Path(spec["path"])
+            feature_count = 1 if path.exists() else 0
+            out[layer_id] = {
+                "id": str(layer_id),
+                "label": str(spec.get("label", layer_id)),
+                "kind": "vector",
+                "hoverable": bool(spec.get("hoverable", False)),
+                "feature_count": int(feature_count),
+                "url": f"/api/overlay/{layer_id}",
+            }
+        return out
+
+    def get_overlay_payload(self, layer_id: str) -> dict | None:
+        key = str(layer_id)
+        if key in self.overlay_payloads:
+            return self.overlay_payloads[key]
+
+        spec = self.overlay_specs.get(key)
+        if spec is None:
+            return None
+
+        path = Path(spec["path"])
+        payload = self._overlay_geojson(
+            path=path,
+            simplify_tolerance=float(spec.get("simplify_tolerance", 0.0)),
+            keep_columns=spec.get("keep_columns"),
+        )
+        self.overlay_payloads[key] = payload
+
+        manifest_entry = self.overlay_manifest.get(key)
+        if manifest_entry is not None:
+            features = payload.get("features") if isinstance(payload, dict) else []
+            manifest_entry["feature_count"] = len(features) if isinstance(features, list) else 0
+
+        return payload
+
     def _build_bootstrap_payload(self, muni_gdf: gpd.GeoDataFrame) -> dict:
         muni_out = muni_gdf.to_crs(epsg=4326).copy()
         muni_out["geometry"] = muni_out.geometry.simplify(0.0008)
@@ -353,30 +433,11 @@ class DataStore:
         muni_safe = self._sanitize_for_json(muni_out[keep_cols + ["geometry"]])
         muni_geojson = json.loads(muni_safe.to_json())
 
-        overlays = {
-            "national_border": self._overlay_geojson(
-                self.background_dir / "01_swiss_national_border.geojson",
-                simplify_tolerance=0.0005,
-            ),
-            "cantons": self._overlay_geojson(
-                self.background_dir / "02_swiss_cantons.geojson",
-                simplify_tolerance=0.001,
-            ),
-            "bioregions": self._overlay_geojson(
-                self.background_dir / "04_swiss_bioregions.geojson",
-                simplify_tolerance=0.001,
-                keep_columns=["DEBioBedeu", "RegionName"],
-            ),
-            "isos": self._overlay_geojson(
-                self._resolve_isos_path(),
-                simplify_tolerance=0.0,
-                keep_columns=None,
-            ),
-        }
-
         return {
             "municipalities": muni_geojson,
-            "overlays": overlays,
+            # Keep "overlays" key for backward compatibility during transition.
+            "overlays": {},
+            "overlay_manifest": self.overlay_manifest,
             "raster_overlays": self.raster_overlay_meta,
             "controls": {
                 "seasons": ["annual", "winter"],
@@ -403,7 +464,7 @@ class DataStore:
                         "bivariate_municipalities": True,
                         "national_border": True,
                         "cantons": False,
-                        "isos": True,
+                        "isos": False,
                         "bioregions": False,
                         "population": False,
                         "elevation": False,
@@ -412,7 +473,7 @@ class DataStore:
                         "national_border": True,
                         "cantons": False,
                         "bioregions": False,
-                        "isos": True,
+                        "isos": False,
                     },
                 },
             },

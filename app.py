@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 import threading
 import os
 
 from flask import Flask, Response, jsonify, render_template, request
+try:
+    from flask_compress import Compress
+except Exception:  # pragma: no cover
+    Compress = None
 
 from services.compute import compute_bivariate_records, compute_exceptional_ids
 from services.data_store import DataStore
@@ -14,15 +20,21 @@ from services.data_store import DataStore
 BASE_DIR = Path(__file__).resolve().parent
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
+if Compress is not None:
+    Compress(app)
 store = DataStore(BASE_DIR)
 
 _load_error: str | None = None
+_json_response_cache: dict[str, tuple[bytes, str]] = {}
+_binary_etag_cache: dict[str, str] = {}
 
 
 def _background_load() -> None:
     global _load_error
     try:
         store.load()
+        _json_response_cache.clear()
+        _binary_etag_cache.clear()
     except Exception as exc:  # pragma: no cover
         _load_error = str(exc)
 
@@ -31,6 +43,58 @@ threading.Thread(target=_background_load, daemon=True).start()
 
 VALID_SEASONS = {"annual", "winter"}
 VALID_TEMP_METHODS = {"mean-mean", "mean-range", "mean-min", "mean-max"}
+
+
+def _etag_hex(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _cached_json_response(
+    payload: dict,
+    cache_key: str,
+    cache_control: str = "public, max-age=300",
+) -> Response:
+    cached = _json_response_cache.get(cache_key)
+    if cached is None:
+        blob = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        etag = _etag_hex(blob)
+        cached = (blob, etag)
+        _json_response_cache[cache_key] = cached
+    blob, etag = cached
+
+    if request.if_none_match and request.if_none_match.contains(etag):
+        resp = Response(status=304)
+        resp.set_etag(etag)
+        resp.headers["Cache-Control"] = cache_control
+        return resp
+
+    resp = Response(blob, mimetype="application/json")
+    resp.set_etag(etag)
+    resp.headers["Cache-Control"] = cache_control
+    return resp
+
+
+def _cached_binary_response(
+    payload: bytes,
+    cache_key: str,
+    mimetype: str,
+    cache_control: str,
+) -> Response:
+    etag = _binary_etag_cache.get(cache_key)
+    if etag is None:
+        etag = _etag_hex(payload)
+        _binary_etag_cache[cache_key] = etag
+
+    if request.if_none_match and request.if_none_match.contains(etag):
+        resp = Response(status=304)
+        resp.set_etag(etag)
+        resp.headers["Cache-Control"] = cache_control
+        return resp
+
+    resp = Response(payload, mimetype=mimetype)
+    resp.set_etag(etag)
+    resp.headers["Cache-Control"] = cache_control
+    return resp
 
 
 def _parse_bool(value, default: bool) -> bool:
@@ -73,7 +137,21 @@ def api_bootstrap():
         return jsonify({"error": _load_error}), 500
     if not store.ready:
         return jsonify({"error": "Data store is still loading"}), 503
-    return jsonify(store.bootstrap_payload)
+    return _cached_json_response(store.bootstrap_payload, "bootstrap")
+
+
+@app.route("/api/overlay/<layer_id>")
+def api_overlay(layer_id: str):
+    if _load_error:
+        return jsonify({"error": _load_error}), 500
+    if not store.ready:
+        return jsonify({"error": "Data store is still loading"}), 503
+
+    payload = store.get_overlay_payload(str(layer_id))
+    if payload is None:
+        return jsonify({"error": f"Unknown overlay layer: {layer_id}"}), 404
+
+    return _cached_json_response(payload, f"overlay:{layer_id}")
 
 
 @app.route("/api/raster/<layer_id>.png")
@@ -87,10 +165,11 @@ def api_raster(layer_id: str):
     if payload is None:
         return jsonify({"error": f"Unknown raster layer: {layer_id}"}), 404
 
-    return Response(
+    return _cached_binary_response(
         payload,
+        cache_key=f"raster:{layer_id}",
         mimetype="image/png",
-        headers={"Cache-Control": "public, max-age=3600"},
+        cache_control="public, max-age=3600",
     )
 
 
