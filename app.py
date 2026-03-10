@@ -1,4 +1,4 @@
-"""Standalone Flask app for the municipality bivariate filter map."""
+"""Standalone Flask app for the municipality featured filter map."""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ from services.compute import (
     compute_bivariate_records,
     compute_exceptional_ids,
     filter_records_by_bivariate_class,
-    select_exceptional_ids_by_climate_risk_share,
+    select_exceptional_ids_by_climate_risk_share_per_zone,
 )
 from services.data_store import DataStore
 
@@ -141,6 +141,35 @@ def _parse_bool(value, default: bool) -> bool:
     return default
 
 
+def _parse_int_list(values) -> list[int]:
+    if not isinstance(values, list):
+        return []
+    out: list[int] = []
+    seen: set[int] = set()
+    for value in values:
+        try:
+            parsed = int(float(value))
+        except Exception:
+            continue
+        if parsed in seen:
+            continue
+        seen.add(parsed)
+        out.append(parsed)
+    return out
+
+
+def _parse_zone_number(value) -> int | None:
+    try:
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        return int(float(text))
+    except Exception:
+        return None
+
+
 @app.route("/")
 def index():
     return render_template("index.html")
@@ -256,6 +285,10 @@ def api_recompute():
         seen_excluded.add(bi_class)
         excluded_bivariate_classes.append(bi_class)
 
+    selected_material_zone_numbers = _parse_int_list(
+        body.get("selected_building_material_zone_numbers", []),
+    )
+
     temp_by_bfs = store.get_temperature(season, temp_method, exclude_non_habitable)
     old_pct_by_bfs = store.compute_old_pct(excluded_heating_types)
 
@@ -271,6 +304,19 @@ def api_recompute():
         k_old=k_old,
         temp_extreme=temp_extreme,
     )
+    stage1_base_exceptional_count = int(len(stage1_exceptional_ids))
+    selected_material_zone_set = set(selected_material_zone_numbers)
+    if selected_material_zone_set:
+        filtered_stage1_ids: list[str] = []
+        for bfs in stage1_exceptional_ids:
+            zone_num = store.metadata_by_bfs.get(str(bfs), {}).get("building_material_zone_number")
+            zone_val = _parse_zone_number(zone_num)
+            if zone_val is None:
+                continue
+            if zone_val in selected_material_zone_set:
+                filtered_stage1_ids.append(str(bfs))
+        stage1_exceptional_ids = filtered_stage1_ids
+    stage1_material_filtered_count = int(len(stage1_exceptional_ids))
 
     climate_scores, climate_meta = compute_dynamic_climate_risk_scores(
         store.climate_indicator_frame,
@@ -282,21 +328,31 @@ def api_recompute():
         if np.isfinite(score)
     }
 
+    zone_number_by_bfs: dict[str, int | None] = {}
+    for bfs, meta in store.metadata_by_bfs.items():
+        zone_raw = meta.get("building_material_zone_number")
+        zone_val = _parse_zone_number(zone_raw)
+        zone_number_by_bfs[str(bfs)] = zone_val
+
     if climate_meta["climate_stage_enabled"]:
-        exceptional_ids, climate_stage_status, climate_stats = select_exceptional_ids_by_climate_risk_share(
+        exceptional_ids, climate_stage_status, climate_stats = select_exceptional_ids_by_climate_risk_share_per_zone(
             stage1_exceptional_ids,
             climate_scores_by_bfs,
             climate_top_share_pct,
+            zone_number_by_bfs,
         )
     else:
         exceptional_ids = list(stage1_exceptional_ids)
         climate_stage_status = {str(bfs): "selected" for bfs in stage1_exceptional_ids}
         climate_stats = {
+            "climate_selection_scope": "per_building_material_zone",
             "climate_top_share_pct": float(climate_top_share_pct),
             "climate_stage_input_count": int(len(stage1_exceptional_ids)),
             "climate_stage_valid_count": 0,
             "climate_stage_output_count": int(len(stage1_exceptional_ids)),
             "climate_missing_excluded": 0,
+            "climate_stage_zone_counts": [],
+            "climate_stage_zone_count": 0,
         }
 
     for bfs, rec in records.items():
@@ -323,11 +379,16 @@ def api_recompute():
                 "climate_indicator_count": int(climate_meta["usable_indicator_count"]),
                 "climate_indicator_keys": climate_indicator_keys,
                 "climate_ignored_indicators": climate_meta["climate_ignored_indicators"],
+                "climate_selection_scope": str(climate_stats.get("climate_selection_scope", "per_building_material_zone")),
+                "climate_stage_zone_counts": climate_stats.get("climate_stage_zone_counts", []),
+                "climate_stage_zone_count": int(climate_stats.get("climate_stage_zone_count", 0)),
                 "excluded_bivariate_classes": stage1_class_stats["excluded_bivariate_classes"],
                 "stage1_candidate_record_count_before_filter": int(stage1_class_stats["stage1_candidate_record_count_before_filter"]),
                 "stage1_candidate_record_count_after_filter": int(stage1_class_stats["stage1_candidate_record_count_after_filter"]),
                 "stage1_candidate_record_excluded_count": int(stage1_class_stats["stage1_candidate_record_excluded_count"]),
-                "stage1_exceptional_count": int(len(stage1_exceptional_ids)),
+                "selected_building_material_zone_numbers": selected_material_zone_numbers,
+                "stage1_exceptional_count": int(stage1_base_exceptional_count),
+                "stage1_material_filtered_count": int(stage1_material_filtered_count),
                 "stage2_exceptional_count": int(len(exceptional_ids)),
                 "climate_stage_input_count": int(climate_stats["climate_stage_input_count"]),
                 "climate_stage_valid_count": int(climate_stats["climate_stage_valid_count"]),

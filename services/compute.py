@@ -1,10 +1,10 @@
-"""Computation helpers for bivariate municipality map."""
+"""Computation helpers for municipality featured filter map."""
 
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Dict, Iterable, Tuple
+from typing import Any, Dict, Iterable, Tuple
 
 import numpy as np
 
@@ -202,6 +202,69 @@ def select_exceptional_ids_by_climate_risk_share(
         "climate_stage_valid_count": int(valid_count),
         "climate_stage_output_count": int(len(selected_ids)),
         "climate_missing_excluded": int(missing_excluded),
+    }
+    return selected_ids, status_by_bfs, stats
+
+
+def select_exceptional_ids_by_climate_risk_share_per_zone(
+    stage1_exceptional_ids: list[str],
+    climate_scores_by_bfs: Dict[str, float],
+    top_share_pct: float,
+    zone_number_by_bfs: Dict[str, int | None],
+) -> Tuple[list[str], Dict[str, str], Dict[str, int | float | str | list[dict[str, Any]]]]:
+    """Select top climate-risk share separately inside each building-material zone."""
+    status_by_bfs: Dict[str, str] = {}
+    ranked_by_zone: Dict[int | None, list[tuple[str, float]]] = {}
+    missing_excluded = 0
+
+    for bfs in stage1_exceptional_ids:
+        key = str(bfs)
+        value = climate_scores_by_bfs.get(key)
+        if value is None or not np.isfinite(value):
+            status_by_bfs[key] = "missing"
+            missing_excluded += 1
+            continue
+        zone_key = zone_number_by_bfs.get(key)
+        ranked_by_zone.setdefault(zone_key, []).append((key, float(value)))
+
+    selected_ids: list[str] = []
+    total_valid_count = 0
+    per_zone_counts: list[dict[str, Any]] = []
+    ordered_zone_keys = sorted(ranked_by_zone.keys(), key=lambda value: (value is None, value if value is not None else 0))
+
+    for zone_key in ordered_zone_keys:
+        ranked = ranked_by_zone.get(zone_key, [])
+        ranked.sort(key=lambda item: (-item[1], item[0]))
+        valid_count = len(ranked)
+        total_valid_count += valid_count
+        if valid_count > 0:
+            selected_count = max(1, int(math.ceil(valid_count * (float(top_share_pct) / 100.0))))
+        else:
+            selected_count = 0
+
+        selected_zone_ids = [bfs for bfs, _ in ranked[:selected_count]]
+        selected_zone_set = set(selected_zone_ids)
+        selected_ids.extend(selected_zone_ids)
+        for bfs, _score in ranked:
+            status_by_bfs[bfs] = "selected" if bfs in selected_zone_set else "filtered_out"
+
+        per_zone_counts.append(
+            {
+                "zone_number": zone_key,
+                "stage1_valid_count": int(valid_count),
+                "selected_count": int(len(selected_zone_ids)),
+            }
+        )
+
+    stats = {
+        "climate_selection_scope": "per_building_material_zone",
+        "climate_top_share_pct": float(top_share_pct),
+        "climate_stage_input_count": int(len(stage1_exceptional_ids)),
+        "climate_stage_valid_count": int(total_valid_count),
+        "climate_stage_output_count": int(len(selected_ids)),
+        "climate_missing_excluded": int(missing_excluded),
+        "climate_stage_zone_counts": per_zone_counts,
+        "climate_stage_zone_count": int(len(per_zone_counts)),
     }
     return selected_ids, status_by_bfs, stats
 

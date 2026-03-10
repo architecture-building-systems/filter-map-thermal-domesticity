@@ -98,6 +98,7 @@ class DataStore:
         self.climate_indicator_frame: pd.DataFrame = pd.DataFrame()
         self.climate_indicator_options: list[dict[str, str | bool]] = []
         self.default_climate_indicator_keys: list[str] = []
+        self.building_material_zone_options: list[dict[str, str | int]] = []
         self.temperature_cache: dict[tuple[str, str, bool], dict[str, float]] = {}
         self.heating_records: dict[str, HeatingAgeRecord] = {}
         self.heating_codes: set[str] = set()
@@ -132,6 +133,7 @@ class DataStore:
         self.climate_indicator_frame = self._build_climate_indicator_frame(muni_gdf)
         self.climate_indicator_options = get_climate_indicator_options(self.climate_indicator_frame.columns)
         self.default_climate_indicator_keys = default_indicator_keys(self.climate_indicator_frame.columns)
+        self.building_material_zone_options = self._build_material_zone_options(muni_gdf)
 
         self._prepare_label_raster(muni_gdf)
         self._precompute_temperature_aggregates()
@@ -162,8 +164,38 @@ class DataStore:
             if np.isfinite(climate_risk):
                 rec["climate_risk_gwl3.0"] = float(climate_risk)
                 climate_risk_by_bfs[bfs] = float(climate_risk)
+
+            zone_number = _safe_int(row.get("building_material_zone_number"), None)
+            zone_label = str(row.get("building_material_zone") or "").strip()
+            if zone_number is not None:
+                rec["building_material_zone_number"] = int(zone_number)
+            if zone_label:
+                rec["building_material_zone"] = zone_label
             out[bfs] = rec
         return out, climate_risk_by_bfs
+
+    def _build_material_zone_options(self, gdf: gpd.GeoDataFrame) -> list[dict[str, str | int]]:
+        if "building_material_zone_number" not in gdf.columns:
+            return []
+
+        options_by_number: dict[int, str] = {}
+        for _, row in gdf.iterrows():
+            zone_number = _safe_int(row.get("building_material_zone_number"), None)
+            if zone_number is None:
+                continue
+            zone_label = str(row.get("building_material_zone") or "").strip()
+            if zone_number not in options_by_number:
+                options_by_number[zone_number] = zone_label or f"Zone {zone_number}"
+            elif not options_by_number[zone_number] and zone_label:
+                options_by_number[zone_number] = zone_label
+
+        return [
+            {
+                "zone_number": int(zone_number),
+                "zone_label": str(options_by_number[zone_number] or f"Zone {zone_number}"),
+            }
+            for zone_number in sorted(options_by_number.keys())
+        ]
 
     def _build_climate_indicator_frame(self, gdf: gpd.GeoDataFrame) -> pd.DataFrame:
         indicator_cols = [item["key"] for item in get_climate_indicator_options(gdf.columns)]
@@ -513,6 +545,7 @@ class DataStore:
                 "temperature_methods": ["mean-mean", "mean-range", "mean-min", "mean-max"],
                 "heating_options": label_heating_options(self.heating_codes),
                 "climate_indicator_options": self.climate_indicator_options,
+                "building_material_zone_options": self.building_material_zone_options,
                 "defaults": {
                     "season": "annual",
                     "temp_method": "mean-range",
@@ -522,6 +555,8 @@ class DataStore:
                     "k_old": 1.0,
                     "climate_indicator_keys": self.default_climate_indicator_keys,
                     "climate_top_share_pct": 25,
+                    "municipality_display_mode": "bivariate",
+                    "selected_building_material_zone_numbers": [],
                     "auto_update": True,
                     "layer_order": [
                         "national_border",
@@ -534,7 +569,7 @@ class DataStore:
                     ],
                     "show_layers": {
                         "bivariate_municipalities": True,
-                        "national_border": True,
+                        "national_border": False,
                         "cantons": False,
                         "isos": False,
                         "bioregions": False,
@@ -542,7 +577,7 @@ class DataStore:
                         "elevation": False,
                     },
                     "show_overlays": {
-                        "national_border": True,
+                        "national_border": False,
                         "cantons": False,
                         "bioregions": False,
                         "isos": False,
@@ -726,3 +761,14 @@ def _safe_float(v, default: float = 0.0) -> float:
         return float(v)
     except Exception:
         return float(default)
+
+
+def _safe_int(v, default: int | None = 0) -> int | None:
+    try:
+        if v is None:
+            return default
+        if isinstance(v, str) and v.strip() == "":
+            return default
+        return int(float(v))
+    except Exception:
+        return default

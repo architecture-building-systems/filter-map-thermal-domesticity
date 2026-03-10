@@ -9,10 +9,15 @@ const state = {
   selectedClimateIndicators: new Set(),
   climateTopSharePct: 25,
   climateStageEnabled: false,
+  municipalityDisplayMode: "bivariate",
+  buildingMaterialZoneOptions: [],
+  selectedBuildingMaterialZones: new Set(),
+  materialZoneColorMap: {},
   climateIndicatorScrollTop: 0,
   analysisStackOpenClimateMain: false,
   analysisStackOpenClimateLegend: false,
   analysisStackOpenExceptional: false,
+  analysisStackOpenExceptionalInfo: false,
   legendSelectedClasses: new Set(),
   map: null,
   muniLayer: null,
@@ -38,11 +43,12 @@ const state = {
   isosZoomSettleHandle: null,
   isZoomingMap: false,
   bootHintTimer: null,
+  topRowNavWired: false,
   bioregionColorMap: {},
   bioregionOrder: [],
   bioregionPatternReady: false,
   layerDisplayNames: {
-    bivariate_municipalities: "Bivariate Municipalities",
+    bivariate_municipalities: "Municipality Featured Filter",
     bioregions: "Bioregions",
     isos: "ISOS",
   },
@@ -56,6 +62,19 @@ const ISOS_MARKER_FILL = "#ffffff";
 const ISOS_MARKER_STROKE = "#111111";
 const WHITE_FILL = "#ffffff";
 const SVG_NS = "http://www.w3.org/2000/svg";
+const MUNICIPALITY_DISPLAY_MODES = {
+  BIVARIATE: "bivariate",
+  MATERIAL: "building_material_zone",
+};
+const MATERIAL_ZONE_COLORS = [
+  "#4c78a8",
+  "#f58518",
+  "#54a24b",
+  "#e45756",
+  "#72b7b2",
+  "#b279a2",
+  "#9d755d",
+];
 
 const LAYER_DEFAULT_ORDER = [
   "national_border",
@@ -68,7 +87,7 @@ const LAYER_DEFAULT_ORDER = [
 ];
 
 const LAYER_META = {
-  bivariate_municipalities: { label: "Bivariate municipalities", hoverable: true, kind: "bivariate" },
+  bivariate_municipalities: { label: "Municipality Featured Filter", hoverable: true, kind: "bivariate" },
   elevation: { label: "Elevation", hoverable: false, kind: "raster" },
   population: { label: "Population", hoverable: false, kind: "raster" },
   bioregions: { label: "Bioregions", hoverable: true, kind: "vector" },
@@ -160,9 +179,11 @@ const FRIENDLY_FIELD_LABELS = {
   canton_name: "Canton",
   temp: "Temp (°C)",
   pct_old1919: "Old Buildings (%)",
+  building_material_zone: "Building Material Zone",
+  building_material_zone_number: "Building Material Zone Number",
   climate_risk_score: "Climate Risk Score",
   "climate_risk_gwl3.0": "Stored Climate Risk (GWL 3.0)",
-  bi_class: "Bivariate Class",
+  bi_class: "Municipality Featured Filter Class",
   DEBioBedeu: "Bioregion",
   RegionName: "Region Name",
   Text: "Description",
@@ -197,6 +218,9 @@ const el = {
   layerOrderList: document.getElementById("layer-order-list"),
   heatingList: document.getElementById("heating-list"),
   updateBtn: document.getElementById("btn-update"),
+  topStackShell: document.getElementById("top-stack-shell"),
+  topScrollLeft: document.getElementById("top-scroll-left"),
+  topScrollRight: document.getElementById("top-scroll-right"),
   hoverPillRow: document.getElementById("hover-pill-row"),
   appLoader: document.getElementById("app-loader"),
   loaderStage: document.getElementById("app-loader-stage"),
@@ -237,6 +261,37 @@ function showLoaderError(message) {
 function hideLoader() {
   if (!el.appLoader) return;
   el.appLoader.classList.add("is-hidden");
+}
+
+function normalizeMunicipalityDisplayMode(value) {
+  const mode = String(value || "").trim();
+  if (mode === MUNICIPALITY_DISPLAY_MODES.MATERIAL) return MUNICIPALITY_DISPLAY_MODES.MATERIAL;
+  return MUNICIPALITY_DISPLAY_MODES.BIVARIATE;
+}
+
+function normalizeMaterialZoneNumber(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return null;
+  return Math.trunc(numeric);
+}
+
+function _uniqueNumbers(values = []) {
+  if (!Array.isArray(values)) return [];
+  const seen = new Set();
+  const out = [];
+  values.forEach((value) => {
+    const n = normalizeMaterialZoneNumber(value);
+    if (n === null || seen.has(n)) return;
+    seen.add(n);
+    out.push(n);
+  });
+  return out;
+}
+
+function selectedMaterialZoneNumbersArray() {
+  return [...state.selectedBuildingMaterialZones]
+    .map((v) => normalizeMaterialZoneNumber(v))
+    .filter((v) => v !== null);
 }
 
 function overlayGeojson(layerId) {
@@ -307,7 +362,7 @@ function defaultLayerVisibility(defaults = {}) {
       : true,
     national_border: Object.prototype.hasOwnProperty.call(showLayers, "national_border")
       ? !!showLayers.national_border
-      : (Object.prototype.hasOwnProperty.call(showOverlays, "national_border") ? !!showOverlays.national_border : true),
+      : (Object.prototype.hasOwnProperty.call(showOverlays, "national_border") ? !!showOverlays.national_border : false),
     cantons: Object.prototype.hasOwnProperty.call(showLayers, "cantons")
       ? !!showLayers.cantons
       : (Object.prototype.hasOwnProperty.call(showOverlays, "cantons") ? !!showOverlays.cantons : false),
@@ -334,6 +389,33 @@ function moveLayerOrderItem(sourceId, targetId) {
   const [item] = next.splice(from, 1);
   next.splice(to, 0, item);
   state.layerOrder = next;
+}
+
+function materialZoneLabel(zoneNumber) {
+  const zone = normalizeMaterialZoneNumber(zoneNumber);
+  if (zone === null) return "Unspecified";
+  const match = state.buildingMaterialZoneOptions.find((opt) => normalizeMaterialZoneNumber(opt.zone_number) === zone);
+  const label = String(match?.zone_label || "").trim();
+  return label || `Zone ${zone}`;
+}
+
+function buildMaterialZoneColorMap() {
+  state.materialZoneColorMap = {};
+  const options = state.buildingMaterialZoneOptions || [];
+  options.forEach((option, idx) => {
+    const zone = normalizeMaterialZoneNumber(option.zone_number);
+    if (zone === null) return;
+    const fallbackIdx = hashString(String(zone)) % MATERIAL_ZONE_COLORS.length;
+    state.materialZoneColorMap[zone] = MATERIAL_ZONE_COLORS[idx] || MATERIAL_ZONE_COLORS[fallbackIdx] || "#8a8a8a";
+  });
+}
+
+function resolveMaterialZoneColor(zoneNumber) {
+  const zone = normalizeMaterialZoneNumber(zoneNumber);
+  if (zone === null) return FALLBACK_FILL;
+  if (state.materialZoneColorMap[zone]) return state.materialZoneColorMap[zone];
+  const fallbackIdx = hashString(String(zone)) % MATERIAL_ZONE_COLORS.length;
+  return MATERIAL_ZONE_COLORS[fallbackIdx] || FALLBACK_FILL;
 }
 
 function bioregionKeyFromProps(props) {
@@ -802,6 +884,7 @@ function getExcludedHeatingTypes() {
 }
 
 function currentPayload() {
+  const mode = normalizeMunicipalityDisplayMode(state.municipalityDisplayMode);
   return {
     season: el.season.value,
     temp_method: el.tempMethod.value,
@@ -809,7 +892,8 @@ function currentPayload() {
     excluded_heating_types: getExcludedHeatingTypes(),
     k_temp: Number(el.kTemp.value || 1.0),
     k_old: Number(el.kOld.value || 1.0),
-    excluded_bivariate_classes: [...state.legendSelectedClasses],
+    excluded_bivariate_classes: mode === MUNICIPALITY_DISPLAY_MODES.BIVARIATE ? [...state.legendSelectedClasses] : [],
+    selected_building_material_zone_numbers: selectedMaterialZoneNumbersArray(),
     climate_indicator_keys: [...state.selectedClimateIndicators],
     climate_top_share_pct: normalizeClimateTopShare(state.climateTopSharePct),
   };
@@ -953,6 +1037,44 @@ function layerMainOptionsMarkup(layerId) {
     }
     const schema = state.hoverSchemas[layerId] || [];
     const selected = state.hoverSelectedFields[layerId] || new Set();
+    let municipalityControls = "";
+    if (layerId === "bivariate_municipalities") {
+      const mode = normalizeMunicipalityDisplayMode(state.municipalityDisplayMode);
+      const zoneOptions = (state.buildingMaterialZoneOptions || [])
+        .map((option) => {
+          const zoneNumber = normalizeMaterialZoneNumber(option.zone_number);
+          if (zoneNumber === null) return "";
+          const checked = state.selectedBuildingMaterialZones.has(zoneNumber) ? " checked" : "";
+          const zoneLabel = String(option.zone_label || `Zone ${zoneNumber}`);
+          return `
+            <label>
+              <input type="checkbox" data-material-zone="${zoneNumber}"${checked}>
+              <span>${escapeHtml(zoneLabel)} (${zoneNumber})</span>
+            </label>
+          `;
+        })
+        .filter(Boolean)
+        .join("");
+
+      municipalityControls = `
+        <div class="municipality-mode-controls">
+          <label class="municipality-mode-select">
+            <span>Display mode</span>
+            <select data-municipality-mode>
+              <option value="${MUNICIPALITY_DISPLAY_MODES.BIVARIATE}"${mode === MUNICIPALITY_DISPLAY_MODES.BIVARIATE ? " selected" : ""}>Municipality Featured Filter</option>
+              <option value="${MUNICIPALITY_DISPLAY_MODES.MATERIAL}"${mode === MUNICIPALITY_DISPLAY_MODES.MATERIAL ? " selected" : ""}>Building Material Zone</option>
+            </select>
+          </label>
+          <div class="field-option-toolbar">
+            <p class="field-option-summary">${state.selectedBuildingMaterialZones.size} zone${state.selectedBuildingMaterialZones.size === 1 ? "" : "s"} selected</p>
+            <button type="button" class="field-option-action" data-clear-material-zones>Clear all</button>
+          </div>
+          <div class="material-zone-fields">
+            ${zoneOptions || "<label>No material zones available</label>"}
+          </div>
+        </div>
+      `;
+    }
     const summaryMarkup = schema.length
       ? `
         <div class="field-option-toolbar">
@@ -969,7 +1091,7 @@ function layerMainOptionsMarkup(layerId) {
           })
           .join("")
       : "<label>No fields available</label>";
-    return `${summaryMarkup}<div class="layer-option-fields">${fieldsHtml}</div>`;
+    return `${municipalityControls}${summaryMarkup}<div class="layer-option-fields">${fieldsHtml}</div>`;
   }
 
   const opacity = normalizeOpacity(state.layerOpacity[layerId], getDefaultLayerOpacity(layerId));
@@ -1077,7 +1199,7 @@ function climateRiskInfoMarkup() {
     `
     : "";
   const stateText = !selectionDisabled && state.climateStageEnabled
-    ? `Selecting the top ${normalizeClimateTopShare(state.climateTopSharePct)}% of Stage 1 exceptional municipalities.`
+    ? `Selecting the top ${normalizeClimateTopShare(state.climateTopSharePct)}% within each building material zone from Stage 1 exceptional municipalities.`
     : "Climate prioritization is disabled until at least one usable indicator remains selected.";
 
   return `
@@ -1093,13 +1215,39 @@ function climateRiskInfoMarkup() {
   `;
 }
 
-function exceptionalRows() {
+function exceptionalFlowInfoMarkup() {
+  return `
+    <div class="climate-risk-info">
+      <p>Exceptional places are selected in three stages.</p>
+      <p><strong>Stage 1:</strong> Municipality Featured Filter identifies exceptional municipalities from temperature and old-building thresholds.</p>
+      <p><strong>Stage 2:</strong> If selected, building material zones limit Stage 1 to the chosen cultural groups.</p>
+      <p><strong>Stage 3:</strong> Climate prioritization ranks each remaining zone separately and keeps the top share within each zone.</p>
+    </div>
+  `;
+}
+
+function sortExceptionalRows(rows = []) {
   const statusRank = {
     selected: 0,
     filtered_out: 1,
     missing: 2,
   };
+  return [...rows].sort((a, b) => {
+    const aScore = Number.isFinite(Number(a.climateRiskScore)) ? Number(a.climateRiskScore) : Number.NEGATIVE_INFINITY;
+    const bScore = Number.isFinite(Number(b.climateRiskScore)) ? Number(b.climateRiskScore) : Number.NEGATIVE_INFINITY;
+    if (aScore !== bScore) return bScore - aScore;
 
+    const aStatus = Object.prototype.hasOwnProperty.call(statusRank, a.status) ? statusRank[a.status] : 99;
+    const bStatus = Object.prototype.hasOwnProperty.call(statusRank, b.status) ? statusRank[b.status] : 99;
+    if (aStatus !== bStatus) return aStatus - bStatus;
+
+    const labelCmp = a.label.localeCompare(b.label);
+    if (labelCmp !== 0) return labelCmp;
+    return a.bfs.localeCompare(b.bfs);
+  });
+}
+
+function collectExceptionalRows() {
   return [...state.exceptionalStage1]
     .map((bfs) => {
       const rec = state.records[bfs] || {};
@@ -1109,6 +1257,10 @@ function exceptionalRows() {
       const status = String(state.climateStageStatus[bfs] || "selected");
       const climateRiskScore = rec.climate_risk_score;
       const storedClimateRisk = rec["climate_risk_gwl3.0"];
+      const zoneNumber = normalizeMaterialZoneNumber(rec.building_material_zone_number);
+      const zoneLabel = zoneNumber === null
+        ? "Unspecified"
+        : materialZoneLabel(zoneNumber);
       return {
         bfs: String(bfs),
         name,
@@ -1117,24 +1269,61 @@ function exceptionalRows() {
         status,
         climateRiskScore,
         storedClimateRisk,
+        zoneNumber,
+        zoneLabel,
         temp: rec.temp,
         pctOld1919: rec.pct_old1919,
         biClass: rec.bi_class,
       };
-    })
-    .sort((a, b) => {
-      const aScore = Number.isFinite(Number(a.climateRiskScore)) ? Number(a.climateRiskScore) : Number.NEGATIVE_INFINITY;
-      const bScore = Number.isFinite(Number(b.climateRiskScore)) ? Number(b.climateRiskScore) : Number.NEGATIVE_INFINITY;
-      if (aScore !== bScore) return bScore - aScore;
-
-      const aStatus = Object.prototype.hasOwnProperty.call(statusRank, a.status) ? statusRank[a.status] : 99;
-      const bStatus = Object.prototype.hasOwnProperty.call(statusRank, b.status) ? statusRank[b.status] : 99;
-      if (aStatus !== bStatus) return aStatus - bStatus;
-
-      const labelCmp = a.label.localeCompare(b.label);
-      if (labelCmp !== 0) return labelCmp;
-      return a.bfs.localeCompare(b.bfs);
     });
+}
+
+function groupedExceptionalRows() {
+  const rows = collectExceptionalRows();
+  const groupsByKey = new Map();
+  rows.forEach((row) => {
+    const key = row.zoneNumber === null ? "zone-missing" : `zone-${row.zoneNumber}`;
+    if (!groupsByKey.has(key)) {
+      groupsByKey.set(key, {
+        key,
+        zoneNumber: row.zoneNumber,
+        zoneLabel: row.zoneLabel,
+        rows: [],
+      });
+    }
+    groupsByKey.get(key).rows.push(row);
+  });
+
+  const orderedZoneNumbers = (state.buildingMaterialZoneOptions || [])
+    .map((opt) => normalizeMaterialZoneNumber(opt.zone_number))
+    .filter((v) => v !== null);
+
+  const groups = [];
+  const seen = new Set();
+  orderedZoneNumbers.forEach((zoneNumber) => {
+    const key = `zone-${zoneNumber}`;
+    const group = groupsByKey.get(key);
+    if (!group) return;
+    group.rows = sortExceptionalRows(group.rows);
+    groups.push(group);
+    seen.add(key);
+  });
+
+  [...groupsByKey.keys()]
+    .filter((key) => !seen.has(key))
+    .sort((a, b) => a.localeCompare(b))
+    .forEach((key) => {
+      const group = groupsByKey.get(key);
+      if (!group) return;
+      group.rows = sortExceptionalRows(group.rows);
+      groups.push(group);
+    });
+
+  return groups;
+}
+
+function exceptionalRows() {
+  return groupedExceptionalRows().flatMap((group) => group.rows);
 }
 
 function csvEscape(value) {
@@ -1154,6 +1343,8 @@ function downloadExceptionalCsv() {
     "bfs",
     "municipality",
     "canton",
+    "building_material_zone_number",
+    "building_material_zone",
     "status",
     "climate_risk_score",
     "stored_climate_risk_gwl3_0",
@@ -1168,6 +1359,8 @@ function downloadExceptionalCsv() {
       row.bfs,
       row.name,
       row.canton,
+      row.zoneNumber ?? "",
+      row.zoneLabel || "",
       row.status,
       Number.isFinite(Number(row.climateRiskScore)) ? Number(row.climateRiskScore).toFixed(6) : "",
       Number.isFinite(Number(row.storedClimateRisk)) ? Number(row.storedClimateRisk).toFixed(6) : "",
@@ -1190,6 +1383,41 @@ function downloadExceptionalCsv() {
   URL.revokeObjectURL(url);
 }
 
+function syncTopRowNav() {
+  if (!el.hoverPillRow || !el.topScrollLeft || !el.topScrollRight) return;
+  const maxScrollLeft = Math.max(0, el.hoverPillRow.scrollWidth - el.hoverPillRow.clientWidth);
+  const hasOverflow = maxScrollLeft > 2;
+  const scrollLeft = el.hoverPillRow.scrollLeft;
+
+  el.topScrollLeft.disabled = !hasOverflow || scrollLeft <= 1;
+  el.topScrollRight.disabled = !hasOverflow || scrollLeft >= (maxScrollLeft - 1);
+}
+
+function wireTopRowNav() {
+  if (state.topRowNavWired) return;
+  state.topRowNavWired = true;
+
+  if (el.hoverPillRow) {
+    el.hoverPillRow.addEventListener("scroll", () => {
+      syncTopRowNav();
+    }, { passive: true });
+  }
+  if (el.topScrollLeft) {
+    el.topScrollLeft.addEventListener("click", () => {
+      el.hoverPillRow?.scrollBy({ left: -320, behavior: "smooth" });
+    });
+  }
+  if (el.topScrollRight) {
+    el.topScrollRight.addEventListener("click", () => {
+      el.hoverPillRow?.scrollBy({ left: 320, behavior: "smooth" });
+    });
+  }
+  window.addEventListener("resize", () => {
+    syncTopRowNav();
+  });
+  syncTopRowNav();
+}
+
 function renderLayerStacks() {
   if (!el.hoverPillRow) return;
 
@@ -1210,17 +1438,21 @@ function renderLayerStacks() {
     if (role === "climate-main") state.analysisStackOpenClimateMain = node.open;
     if (role === "climate-legend") state.analysisStackOpenClimateLegend = node.open;
     if (role === "exceptional-main") state.analysisStackOpenExceptional = node.open;
+    if (role === "exceptional-info") state.analysisStackOpenExceptionalInfo = node.open;
   });
 
   const visibleLayers = getVisibleStackLayers();
   const analysisStacks = [];
   if (state.bootstrap) {
     const exceptionalOpenAttr = state.analysisStackOpenExceptional ? " open" : "";
+    const exceptionalInfoOpenAttr = state.analysisStackOpenExceptionalInfo ? " open" : "";
     analysisStacks.push(`
       <section class="analysis-stack exceptional-stack" data-analysis-stack="exceptional">
         <details class="layer-legend-pill" data-analysis-role="exceptional-main"${exceptionalOpenAttr}>
           <summary class="layer-pill-summary">
-            <span class="layer-pill-title">Exceptional Places</span>
+            <span class="layer-pill-title-wrap">
+              <span class="layer-pill-title">Exceptional Places</span>
+            </span>
             <span class="layer-pill-count" data-analysis-exceptional-count>${state.exceptional.size}</span>
           </summary>
           <div class="layer-pill-body">
@@ -1236,6 +1468,12 @@ function renderLayerStacks() {
             </div>
             <div data-analysis-exceptional-list aria-live="polite"></div>
           </div>
+        </details>
+        <details class="layer-legend-pill" data-analysis-role="exceptional-info"${exceptionalInfoOpenAttr}>
+          <summary class="layer-pill-summary">
+            <span class="layer-pill-title">Exceptional Flow Info</span>
+          </summary>
+          <div class="layer-pill-body">${exceptionalFlowInfoMarkup()}</div>
         </details>
       </section>
     `);
@@ -1265,12 +1503,13 @@ function renderLayerStacks() {
   }
 
   if (analysisStacks.length === 0 && visibleLayers.length === 0) {
-    el.hoverPillRow.classList.add("hidden");
+    if (el.topStackShell) el.topStackShell.classList.add("hidden");
     el.hoverPillRow.innerHTML = "";
+    syncTopRowNav();
     return;
   }
 
-  el.hoverPillRow.classList.remove("hidden");
+  if (el.topStackShell) el.topStackShell.classList.remove("hidden");
 
   const stacksHtml = visibleLayers
     .map((layerId) => {
@@ -1321,6 +1560,7 @@ function renderLayerStacks() {
       if (role === "climate-main") state.analysisStackOpenClimateMain = node.open;
       if (role === "climate-legend") state.analysisStackOpenClimateLegend = node.open;
       if (role === "exceptional-main") state.analysisStackOpenExceptional = node.open;
+      if (role === "exceptional-info") state.analysisStackOpenExceptionalInfo = node.open;
     });
   });
 
@@ -1346,6 +1586,34 @@ function renderLayerStacks() {
       state.hoverSelectedFields[layerKey] = new Set();
       refreshTooltips(layerKey);
       renderLayerStacks();
+    });
+  });
+
+  [...el.hoverPillRow.querySelectorAll("select[data-municipality-mode]")].forEach((node) => {
+    node.addEventListener("change", () => {
+      state.municipalityDisplayMode = normalizeMunicipalityDisplayMode(node.value);
+      updateMunicipalityStyles();
+      renderLayerStacks();
+      if (el.autoUpdate.checked) debounce(() => recompute(false), 350);
+    });
+  });
+
+  [...el.hoverPillRow.querySelectorAll("input[data-material-zone]")].forEach((node) => {
+    node.addEventListener("change", () => {
+      const zone = normalizeMaterialZoneNumber(node.dataset.materialZone);
+      if (zone === null) return;
+      if (node.checked) state.selectedBuildingMaterialZones.add(zone);
+      else state.selectedBuildingMaterialZones.delete(zone);
+      renderLayerStacks();
+      if (el.autoUpdate.checked) debounce(() => recompute(false), 350);
+    });
+  });
+
+  [...el.hoverPillRow.querySelectorAll("button[data-clear-material-zones]")].forEach((node) => {
+    node.addEventListener("click", () => {
+      state.selectedBuildingMaterialZones = new Set();
+      renderLayerStacks();
+      if (el.autoUpdate.checked) debounce(() => recompute(false), 350);
     });
   });
 
@@ -1403,7 +1671,7 @@ function renderLayerStacks() {
     const legendMount = el.hoverPillRow.querySelector(`[data-layer-legend="${layerId}"]`);
     if (!legendMount) return;
     if (layerId === "bivariate_municipalities") {
-      renderLegend(legendMount);
+      renderMunicipalityLegend(legendMount);
     } else if (layerId === "isos") {
       renderIsosLegend(legendMount);
     } else if (layerId === "bioregions") {
@@ -1429,21 +1697,41 @@ function renderLayerStacks() {
   if (restoredClimateScrollNode && state.climateIndicatorScrollTop > 0) {
     restoredClimateScrollNode.scrollTop = state.climateIndicatorScrollTop;
   }
+  syncTopRowNav();
 }
 
 function muniStyle(feature) {
   const rec = recordForFeature(feature);
   const biClass = String(rec?.bi_class || "");
+  const mode = normalizeMunicipalityDisplayMode(state.municipalityDisplayMode);
   const isSelectedClass = biClass.length > 0 && state.legendSelectedClasses.has(biClass);
-  const fill = isSelectedClass ? WHITE_FILL : (rec?.bi_color || FALLBACK_FILL);
+  let fill = rec?.bi_color || FALLBACK_FILL;
+  if (mode === MUNICIPALITY_DISPLAY_MODES.MATERIAL) {
+    fill = resolveMaterialZoneColor(rec?.building_material_zone_number);
+  } else if (isSelectedClass) {
+    fill = WHITE_FILL;
+  }
   const exceptional = rec && state.exceptional.has(String(rec.bfs));
   return {
-    color: exceptional ? ACCENT : "#ffffff",
-    weight: exceptional ? 2.5 : 0.6,
+    color: exceptional ? "#111111" : "#ffffff",
+    weight: exceptional ? 3.6 : 0.6,
     opacity: exceptional ? 1.0 : 0.9,
     fillColor: fill,
-    fillOpacity: isSelectedClass ? 1.0 : 0.82,
+    fillOpacity: mode === MUNICIPALITY_DISPLAY_MODES.MATERIAL ? 0.86 : (isSelectedClass ? 1.0 : 0.82),
   };
+}
+
+function bringExceptionalMunicipalityOutlinesToFront() {
+  if (!state.muniLayer || !state.map || !state.map.hasLayer(state.muniLayer)) return;
+  state.muniLayer.eachLayer((leaf) => {
+    const feature = leaf.feature || {};
+    const rec = recordForFeature(feature);
+    if (!rec) return;
+    if (!state.exceptional.has(String(rec.bfs))) return;
+    if (typeof leaf.bringToFront === "function") {
+      leaf.bringToFront();
+    }
+  });
 }
 
 function refreshMunicipalityTooltips() {
@@ -1734,6 +2022,48 @@ function toggleLegendClass(biClass) {
   }
 }
 
+function renderMaterialZoneLegend(targetNode = null) {
+  const mount = targetNode;
+  if (!mount) return;
+  const options = state.buildingMaterialZoneOptions || [];
+  if (!options.length) {
+    mount.innerHTML = "<p class=\"layer-option-placeholder\">No material zone data available.</p>";
+    return;
+  }
+
+  const rows = options
+    .map((option) => {
+      const zone = normalizeMaterialZoneNumber(option.zone_number);
+      if (zone === null) return "";
+      const color = resolveMaterialZoneColor(zone);
+      const label = materialZoneLabel(zone);
+      return `
+        <div class="material-legend-row">
+          <span class="material-legend-swatch" style="background:${escapeHtml(color)}"></span>
+          <span>${escapeHtml(label)} (${zone})</span>
+        </div>
+      `;
+    })
+    .filter(Boolean)
+    .join("");
+
+  mount.innerHTML = `
+    <div class="material-legend">
+      ${rows}
+    </div>
+    <p class="legend-caption">Display colors show building material zones.</p>
+  `;
+}
+
+function renderMunicipalityLegend(targetNode = null) {
+  const mode = normalizeMunicipalityDisplayMode(state.municipalityDisplayMode);
+  if (mode === MUNICIPALITY_DISPLAY_MODES.MATERIAL) {
+    renderMaterialZoneLegend(targetNode);
+    return;
+  }
+  renderLegend(targetNode);
+}
+
 function renderLegend(targetNode = null) {
   const mount = targetNode;
   if (!mount) return;
@@ -1754,7 +2084,7 @@ function renderLegend(targetNode = null) {
           type="button"
           class="diamond-cell${active}"
           data-bi-class="${escapeHtml(biClass)}"
-          aria-label="Class ${escapeHtml(biClass)} (${escapeHtml(aria)}). Click to whiten and exclude from Stage 1."
+          aria-label="Municipality featured class ${escapeHtml(biClass)} (${escapeHtml(aria)}). Click to whiten and exclude from Stage 1."
           aria-pressed="${active ? "true" : "false"}"
           title="${escapeHtml(biClass)}: ${escapeHtml(aria)}. Click to whiten and exclude from Stage 1."
           style="background:${escapeHtml(color)}; --grid-row:${gridRow}; --grid-col:${gridCol};"
@@ -1771,11 +2101,11 @@ function renderLegend(targetNode = null) {
       <div class="diamond-corner diamond-right">High Temperature<br>Low Buildings</div>
       <div class="diamond-corner diamond-bottom">Low Temperature<br>Low Buildings</div>
       <div class="diamond-corner diamond-left">Low Temperature<br>High Buildings</div>
-      <div class="diamond-center" role="group" aria-label="Bivariate class selection">
+      <div class="diamond-center" role="group" aria-label="Municipality featured class selection">
         ${cellsHtml}
       </div>
     </div>
-    <p class="legend-caption">Clicked classes are whitened and excluded from Stage 1.</p>
+    <p class="legend-caption">Clicked municipality featured classes are whitened and excluded from Stage 1.</p>
   `;
 
   [...mount.querySelectorAll("button[data-bi-class]")].forEach((btn) => {
@@ -1800,29 +2130,48 @@ function renderExceptionalPlaces(listNode = null, countNode = null) {
     return;
   }
 
-  const rows = exceptionalRows();
+  const groups = groupedExceptionalRows();
+  const groupMarkup = groups
+    .map((group) => {
+      const groupSelected = group.rows.filter((row) => row.status === "selected").length;
+      const groupTotal = group.rows.length;
+      const groupTitle = group.zoneNumber === null
+        ? "Unspecified Zone"
+        : `${group.zoneLabel} (${group.zoneNumber})`;
+      const items = group.rows
+        .map(({ bfs, label, status, climateRiskScore }) => {
+          const statusClass = status === "selected"
+            ? "is-selected"
+            : (status === "missing" ? "is-missing" : "is-filtered-out");
+          const badgeText = status === "selected"
+            ? "Selected"
+            : (status === "missing" ? "No climate data" : "Filtered out");
+          const riskText = Number.isFinite(Number(climateRiskScore))
+            ? Number(climateRiskScore).toFixed(2)
+            : "N/A";
+          return `
+            <li class="exceptional-item ${statusClass}">
+              <span class="exceptional-label">${escapeHtml(label)} [${escapeHtml(bfs)}]</span>
+              <span class="exceptional-meta">Climate risk score: ${escapeHtml(riskText)}</span>
+              <span class="exceptional-badge">${escapeHtml(badgeText)}</span>
+            </li>
+          `;
+        })
+        .join("");
 
-  const items = rows
-    .map(({ bfs, label, status, climateRiskScore }) => {
-      const statusClass = status === "selected"
-        ? "is-selected"
-        : (status === "missing" ? "is-missing" : "is-filtered-out");
-      const badgeText = status === "selected"
-        ? "Selected"
-        : (status === "missing" ? "No climate data" : "Filtered out");
-      const riskText = Number.isFinite(Number(climateRiskScore))
-        ? Number(climateRiskScore).toFixed(2)
-        : "N/A";
       return `
-        <li class="exceptional-item ${statusClass}">
-          <span class="exceptional-label">${escapeHtml(label)} [${escapeHtml(bfs)}]</span>
-          <span class="exceptional-meta">Climate risk score: ${escapeHtml(riskText)}</span>
-          <span class="exceptional-badge">${escapeHtml(badgeText)}</span>
-        </li>
+        <section class="exceptional-group">
+          <header class="exceptional-group-head">
+            <h4>${escapeHtml(groupTitle)}</h4>
+            <span>${groupSelected} / ${groupTotal}</span>
+          </header>
+          <ul class="exceptional-list">${items}</ul>
+        </section>
       `;
     })
     .join("");
-  listMount.innerHTML = `<ul class="exceptional-list">${items}</ul>`;
+
+  listMount.innerHTML = `<div class="exceptional-groups">${groupMarkup}</div>`;
 }
 
 function buildIsosLayerColorMap() {
@@ -1974,6 +2323,7 @@ function renderMunicipalities(fitBounds = false) {
 function updateMunicipalityStyles() {
   if (!state.muniLayer) return;
   state.muniLayer.setStyle(muniStyle);
+  bringExceptionalMunicipalityOutlinesToFront();
   refreshMunicipalityTooltips();
 }
 
@@ -2035,6 +2385,7 @@ function applyLayerOrderAndVisibility() {
   }
 
   if (state.layerVisibility.bivariate_municipalities && state.muniLayer && state.map.hasLayer(state.muniLayer)) {
+    bringExceptionalMunicipalityOutlinesToFront();
     refreshMunicipalityTooltips();
   }
 
@@ -2162,20 +2513,30 @@ async function recompute(isInitial = false, rethrowOnError = false) {
     const n = Object.keys(state.records).length;
     const e = state.exceptional.size;
     const stage1 = state.exceptionalStage1.size;
+    const stage1BaseExceptional = Number(state.lastClimateStats.stage1_exceptional_count ?? stage1);
+    const stage1MaterialFiltered = Number(state.lastClimateStats.stage1_material_filtered_count ?? stage1);
+    const selectedMaterialZones = Array.isArray(state.lastClimateStats.selected_building_material_zone_numbers)
+      ? state.lastClimateStats.selected_building_material_zone_numbers
+      : [];
+    const hasMaterialZoneFilter = selectedMaterialZones.length > 0;
     const stage1CandidateAfterFilter = Number(state.lastClimateStats.stage1_candidate_record_count_after_filter ?? n);
     const stage1CandidateExcluded = Number(state.lastClimateStats.stage1_candidate_record_excluded_count ?? 0);
     const hasStage1ClassExclusion = stage1CandidateExcluded > 0;
     if (state.climateStageEnabled) {
-      if (hasStage1ClassExclusion) {
-        setStatus(`${n} municipalities, ${stage1} exceptional from ${stage1CandidateAfterFilter} class-filtered candidates, ${e} climate-priority`);
+      if (hasMaterialZoneFilter) {
+        setStatus(`${n} municipalities, ${stage1MaterialFiltered} exceptional after material-zone filter (from ${stage1BaseExceptional}), ${e} zone-wise climate-priority`);
+      } else if (hasStage1ClassExclusion) {
+        setStatus(`${n} municipalities, ${stage1} exceptional from ${stage1CandidateAfterFilter} class-filtered candidates, ${e} zone-wise climate-priority`);
       } else {
-        setStatus(`${n} municipalities, ${stage1} exceptional after bivariate filters, ${e} climate-priority`);
+        setStatus(`${n} municipalities, ${stage1} exceptional after municipality featured filter, ${e} zone-wise climate-priority`);
       }
     } else {
-      if (hasStage1ClassExclusion) {
+      if (hasMaterialZoneFilter) {
+        setStatus(`${n} municipalities, ${stage1MaterialFiltered} exceptional after material-zone filter (from ${stage1BaseExceptional}), climate prioritization disabled`);
+      } else if (hasStage1ClassExclusion) {
         setStatus(`${n} municipalities, ${stage1} exceptional from ${stage1CandidateAfterFilter} class-filtered candidates, climate prioritization disabled`);
       } else {
-        setStatus(`${n} municipalities, ${stage1} exceptional after bivariate filters, climate prioritization disabled`);
+        setStatus(`${n} municipalities, ${stage1} exceptional after municipality featured filter, climate prioritization disabled`);
       }
     }
   } catch (err) {
@@ -2267,6 +2628,21 @@ async function boot() {
     state.climateIndicatorOptions = Array.isArray(options.climate_indicator_options) ? options.climate_indicator_options : [];
     state.selectedClimateIndicators = new Set((defaults.climate_indicator_keys || []).map(String));
     state.climateTopSharePct = normalizeClimateTopShare(defaults.climate_top_share_pct ?? 25);
+    state.municipalityDisplayMode = normalizeMunicipalityDisplayMode(defaults.municipality_display_mode);
+    state.buildingMaterialZoneOptions = Array.isArray(options.building_material_zone_options)
+      ? options.building_material_zone_options
+          .map((item) => ({
+            zone_number: normalizeMaterialZoneNumber(item.zone_number),
+            zone_label: String(item.zone_label || "").trim(),
+          }))
+          .filter((item) => item.zone_number !== null)
+      : [];
+    state.selectedBuildingMaterialZones = new Set(
+      _uniqueNumbers(defaults.selected_building_material_zone_numbers || [])
+        .map((v) => normalizeMaterialZoneNumber(v))
+        .filter((v) => v !== null),
+    );
+    buildMaterialZoneColorMap();
 
     if (Array.isArray(options.temperature_methods) && options.temperature_methods.length) {
       el.tempMethod.innerHTML = options.temperature_methods
@@ -2290,11 +2666,12 @@ async function boot() {
     ensureLayerOpacityDefaults();
 
     initializeLayerInstances();
+    wireTopRowNav();
     renderLayerOrderControls();
     applyLayerOrderAndVisibility();
     wireAutoUpdateEvents();
 
-    setLoaderStage("Computing bivariate classes", "Calculating initial map values ...");
+    setLoaderStage("Computing municipality featured classes", "Calculating initial map values ...");
     await recompute(true, true);
 
     setLoaderStage("Ready", "Map loaded.");

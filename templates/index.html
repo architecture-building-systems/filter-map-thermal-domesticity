@@ -3,14 +3,14 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Bivariate Filter Map</title>
+  <title>Municipality Featured Filter Map</title>
 
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Comfortaa:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-  <link rel="stylesheet" href="{{ url_for('static', filename='app.css', v='20260304b') }}" />
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css', v='20260310b') }}" />
 </head>
 <body>
   <div id="app-loader" class="is-visible" role="status" aria-live="polite" aria-label="Application loading">
@@ -25,7 +25,11 @@
 
   <main id="map"></main>
 
-  <section id="hover-pill-row" class="hidden" aria-label="Layer options and legends"></section>
+  <section id="top-stack-shell" class="hidden" aria-label="Layer options and legends">
+    <button id="top-scroll-left" class="top-scroll-arrow" type="button" aria-label="Scroll layer pills left">‹</button>
+    <div id="hover-pill-row"></div>
+    <button id="top-scroll-right" class="top-scroll-arrow" type="button" aria-label="Scroll layer pills right">›</button>
+  </section>
 
   <aside id="right-stack" aria-label="Map controls">
     <section id="control-pill" aria-label="Control center">
@@ -105,6 +109,6 @@
   </aside>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <script src="{{ url_for('static', filename='app.js', v='20260304b') }}"></script>
+  <script src="{{ url_for('static', filename='app.js', v='20260310b') }}"></script>
 </body>
 </html>
