@@ -2,6 +2,17 @@ const state = {
   bootstrap: null,
   records: {},
   exceptional: new Set(),
+  exceptionalStage1: new Set(),
+  climateStageStatus: {},
+  lastClimateStats: {},
+  climateIndicatorOptions: [],
+  selectedClimateIndicators: new Set(),
+  climateTopSharePct: 25,
+  climateStageEnabled: false,
+  climateIndicatorScrollTop: 0,
+  analysisStackOpenClimateMain: false,
+  analysisStackOpenClimateLegend: false,
+  analysisStackOpenExceptional: false,
   legendSelectedClasses: new Set(),
   map: null,
   muniLayer: null,
@@ -20,7 +31,6 @@ const state = {
   hoverSelectedFields: {},
   layerStackOpenMain: {},
   layerStackOpenLegend: {},
-  layerStackOpenExceptional: {},
   healthWarning: "",
   isosLayerColorMap: {},
   isosIconCache: {},
@@ -150,6 +160,8 @@ const FRIENDLY_FIELD_LABELS = {
   canton_name: "Canton",
   temp: "Temp (°C)",
   pct_old1919: "Old Buildings (%)",
+  climate_risk_score: "Climate Risk Score",
+  "climate_risk_gwl3.0": "Stored Climate Risk (GWL 3.0)",
   bi_class: "Bivariate Class",
   DEBioBedeu: "Bioregion",
   RegionName: "Region Name",
@@ -797,7 +809,16 @@ function currentPayload() {
     excluded_heating_types: getExcludedHeatingTypes(),
     k_temp: Number(el.kTemp.value || 1.0),
     k_old: Number(el.kOld.value || 1.0),
+    excluded_bivariate_classes: [...state.legendSelectedClasses],
+    climate_indicator_keys: [...state.selectedClimateIndicators],
+    climate_top_share_pct: normalizeClimateTopShare(state.climateTopSharePct),
   };
+}
+
+function normalizeClimateTopShare(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return 25;
+  return Math.min(100, Math.max(1, Math.round(numeric)));
 }
 
 function formatRawFieldLabel(key) {
@@ -932,6 +953,14 @@ function layerMainOptionsMarkup(layerId) {
     }
     const schema = state.hoverSchemas[layerId] || [];
     const selected = state.hoverSelectedFields[layerId] || new Set();
+    const summaryMarkup = schema.length
+      ? `
+        <div class="field-option-toolbar">
+          <p class="field-option-summary">${selected.size} field${selected.size === 1 ? "" : "s"} selected</p>
+          <button type="button" class="field-option-action" data-clear-hover-fields="${escapeHtml(layerId)}">Clear all</button>
+        </div>
+      `
+      : "";
     const fieldsHtml = schema.length
       ? schema
           .map((field) => {
@@ -940,7 +969,7 @@ function layerMainOptionsMarkup(layerId) {
           })
           .join("")
       : "<label>No fields available</label>";
-    return `<div class="layer-option-fields">${fieldsHtml}</div>`;
+    return `${summaryMarkup}<div class="layer-option-fields">${fieldsHtml}</div>`;
   }
 
   const opacity = normalizeOpacity(state.layerOpacity[layerId], getDefaultLayerOpacity(layerId));
@@ -967,8 +996,207 @@ function compactLegendMarkup(layerId) {
   return `<p class="layer-legend-compact">${escapeHtml(note)}</p>`;
 }
 
+function climateRiskOptionsMarkup() {
+  const options = Array.isArray(state.climateIndicatorOptions) ? state.climateIndicatorOptions : [];
+  if (!options.length) {
+    return `<p class="layer-option-placeholder">No climate indicators available.</p>`;
+  }
+
+  const groups = new Map();
+  options.forEach((option) => {
+    const group = String(option.group || "Indicators");
+    if (!groups.has(group)) groups.set(group, []);
+    groups.get(group).push(option);
+  });
+
+  const selectedCount = options.filter((option) => state.selectedClimateIndicators.has(option.key)).length;
+  const helperText = selectedCount === 0
+    ? `<p class="climate-risk-helper">No indicators selected; climate-risk prioritization disabled.</p>`
+    : `<p class="climate-risk-helper">Equal weighting. Scores are minmax-normalized across all municipalities.</p>`;
+
+  const groupMarkup = [...groups.entries()]
+    .map(([group, groupOptions]) => {
+      const items = groupOptions
+        .map((option) => {
+          const checked = state.selectedClimateIndicators.has(option.key) ? " checked" : "";
+          return `
+            <label>
+              <input type="checkbox" data-climate-indicator="${escapeHtml(option.key)}"${checked}>
+              <span>${escapeHtml(option.label || option.key)}</span>
+            </label>
+          `;
+        })
+        .join("");
+      return `
+        <section class="climate-risk-group">
+          <h4>${escapeHtml(group)}</h4>
+          <div class="climate-risk-fields">${items}</div>
+        </section>
+      `;
+    })
+    .join("");
+
+  return `
+    <div class="climate-risk-summary">
+      <div class="field-option-toolbar">
+        <p class="climate-risk-summary-text">${selectedCount} indicator${selectedCount === 1 ? "" : "s"} selected</p>
+        <button type="button" class="field-option-action" data-clear-climate-indicators>Clear all</button>
+      </div>
+      <label class="climate-risk-share-control">
+        <span>Top share (%)</span>
+        <input
+          type="number"
+          min="1"
+          max="100"
+          step="1"
+          value="${normalizeClimateTopShare(state.climateTopSharePct)}"
+          data-climate-top-share
+        />
+      </label>
+    </div>
+    ${helperText}
+    <div class="climate-risk-groups">${groupMarkup}</div>
+  `;
+}
+
+function climateRiskInfoMarkup() {
+  const stats = state.lastClimateStats || {};
+  const indicatorCount = Number(stats.climate_indicator_count || 0);
+  const ignored = Array.isArray(stats.climate_ignored_indicators) ? stats.climate_ignored_indicators : [];
+  const selectionDisabled = state.selectedClimateIndicators.size === 0;
+  const ignoredMarkup = ignored.length
+    ? `
+      <div class="climate-risk-note">
+        <strong>Ignored indicators</strong>
+        <ul class="climate-risk-note-list">
+          ${ignored
+            .map((item) => `<li>${escapeHtml(item.key || "indicator")}: ${escapeHtml(formatRawFieldLabel(item.reason || "ignored"))}</li>`)
+            .join("")}
+        </ul>
+      </div>
+    `
+    : "";
+  const stateText = !selectionDisabled && state.climateStageEnabled
+    ? `Selecting the top ${normalizeClimateTopShare(state.climateTopSharePct)}% of Stage 1 exceptional municipalities.`
+    : "Climate prioritization is disabled until at least one usable indicator remains selected.";
+
+  return `
+    <div class="climate-risk-info">
+      <p>Climate risk is a relative composite exposure score built from projected climate-change indicators.</p>
+      <p>Selected municipality indicators are used directly, minmax-normalized to a <strong>0 to 1</strong> range across all municipalities, and combined with equal weights.</p>
+      <p>Higher scores indicate stronger projected climate stress relative to the rest of the current analysis domain, not absolute risk or impact.</p>
+      <p>Because minmax normalization is domain-dependent, the score reflects comparison within the current municipality set and can be stretched by extreme values.</p>
+      <p>${escapeHtml(stateText)}</p>
+      <p class="climate-risk-note">Usable indicators in current score: <strong>${indicatorCount}</strong>.</p>
+      ${ignoredMarkup}
+    </div>
+  `;
+}
+
+function exceptionalRows() {
+  const statusRank = {
+    selected: 0,
+    filtered_out: 1,
+    missing: 2,
+  };
+
+  return [...state.exceptionalStage1]
+    .map((bfs) => {
+      const rec = state.records[bfs] || {};
+      const name = String(rec.name || rec.NAME || bfs);
+      const canton = String(rec.canton_name || rec.KANTONSNUM || "").trim();
+      const label = canton ? `${name} (${canton})` : name;
+      const status = String(state.climateStageStatus[bfs] || "selected");
+      const climateRiskScore = rec.climate_risk_score;
+      const storedClimateRisk = rec["climate_risk_gwl3.0"];
+      return {
+        bfs: String(bfs),
+        name,
+        canton,
+        label,
+        status,
+        climateRiskScore,
+        storedClimateRisk,
+        temp: rec.temp,
+        pctOld1919: rec.pct_old1919,
+        biClass: rec.bi_class,
+      };
+    })
+    .sort((a, b) => {
+      const aScore = Number.isFinite(Number(a.climateRiskScore)) ? Number(a.climateRiskScore) : Number.NEGATIVE_INFINITY;
+      const bScore = Number.isFinite(Number(b.climateRiskScore)) ? Number(b.climateRiskScore) : Number.NEGATIVE_INFINITY;
+      if (aScore !== bScore) return bScore - aScore;
+
+      const aStatus = Object.prototype.hasOwnProperty.call(statusRank, a.status) ? statusRank[a.status] : 99;
+      const bStatus = Object.prototype.hasOwnProperty.call(statusRank, b.status) ? statusRank[b.status] : 99;
+      if (aStatus !== bStatus) return aStatus - bStatus;
+
+      const labelCmp = a.label.localeCompare(b.label);
+      if (labelCmp !== 0) return labelCmp;
+      return a.bfs.localeCompare(b.bfs);
+    });
+}
+
+function csvEscape(value) {
+  if (value === null || value === undefined) return "";
+  const text = String(value);
+  if (/[",\n]/.test(text)) {
+    return `"${text.replace(/"/g, "\"\"")}"`;
+  }
+  return text;
+}
+
+function downloadExceptionalCsv() {
+  const rows = exceptionalRows();
+  if (!rows.length) return;
+
+  const header = [
+    "bfs",
+    "municipality",
+    "canton",
+    "status",
+    "climate_risk_score",
+    "stored_climate_risk_gwl3_0",
+    "temp",
+    "pct_old1919",
+    "bi_class",
+  ];
+
+  const lines = [
+    header.join(","),
+    ...rows.map((row) => [
+      row.bfs,
+      row.name,
+      row.canton,
+      row.status,
+      Number.isFinite(Number(row.climateRiskScore)) ? Number(row.climateRiskScore).toFixed(6) : "",
+      Number.isFinite(Number(row.storedClimateRisk)) ? Number(row.storedClimateRisk).toFixed(6) : "",
+      Number.isFinite(Number(row.temp)) ? Number(row.temp).toFixed(6) : "",
+      Number.isFinite(Number(row.pctOld1919)) ? Number(row.pctOld1919).toFixed(6) : "",
+      row.biClass || "",
+    ].map(csvEscape).join(",")),
+  ];
+
+  const blob = new Blob([`${lines.join("\n")}\n`], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  const season = String(el.season?.value || "annual");
+  const method = String(el.tempMethod?.value || "mean-range").replace(/[^a-z0-9_-]+/gi, "_");
+  link.href = url;
+  link.download = `exceptional_places_${season}_${method}.csv`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
 function renderLayerStacks() {
   if (!el.hoverPillRow) return;
+
+  const climateScrollNode = el.hoverPillRow.querySelector(".climate-risk-groups");
+  if (climateScrollNode) {
+    state.climateIndicatorScrollTop = climateScrollNode.scrollTop;
+  }
 
   [...el.hoverPillRow.querySelectorAll("details[data-layer][data-stack-role]")].forEach((node) => {
     const layerId = node.dataset.layer;
@@ -976,11 +1204,67 @@ function renderLayerStacks() {
     if (!layerId || !role) return;
     if (role === "main") state.layerStackOpenMain[layerId] = node.open;
     if (role === "legend") state.layerStackOpenLegend[layerId] = node.open;
-    if (role === "exceptional") state.layerStackOpenExceptional[layerId] = node.open;
+  });
+  [...el.hoverPillRow.querySelectorAll("details[data-analysis-role]")].forEach((node) => {
+    const role = node.dataset.analysisRole;
+    if (role === "climate-main") state.analysisStackOpenClimateMain = node.open;
+    if (role === "climate-legend") state.analysisStackOpenClimateLegend = node.open;
+    if (role === "exceptional-main") state.analysisStackOpenExceptional = node.open;
   });
 
   const visibleLayers = getVisibleStackLayers();
-  if (visibleLayers.length === 0) {
+  const analysisStacks = [];
+  if (state.bootstrap) {
+    const exceptionalOpenAttr = state.analysisStackOpenExceptional ? " open" : "";
+    analysisStacks.push(`
+      <section class="analysis-stack exceptional-stack" data-analysis-stack="exceptional">
+        <details class="layer-legend-pill" data-analysis-role="exceptional-main"${exceptionalOpenAttr}>
+          <summary class="layer-pill-summary">
+            <span class="layer-pill-title">Exceptional Places</span>
+            <span class="layer-pill-count" data-analysis-exceptional-count>${state.exceptional.size}</span>
+          </summary>
+          <div class="layer-pill-body">
+            <div class="exceptional-toolbar">
+              <button
+                type="button"
+                class="exceptional-download"
+                data-download-exceptional
+                ${state.exceptionalStage1.size === 0 ? "disabled" : ""}
+              >
+                Download CSV
+              </button>
+            </div>
+            <div data-analysis-exceptional-list aria-live="polite"></div>
+          </div>
+        </details>
+      </section>
+    `);
+  }
+  if (state.climateIndicatorOptions.length > 0) {
+    const climateMainOpenAttr = state.analysisStackOpenClimateMain ? " open" : "";
+    const climateLegendOpenAttr = state.analysisStackOpenClimateLegend ? " open" : "";
+    analysisStacks.push(`
+      <section class="analysis-stack climate-risk-stack" data-analysis-stack="climate-risk">
+        <details class="layer-main-pill" data-analysis-role="climate-main"${climateMainOpenAttr}>
+          <summary class="layer-pill-summary">
+            <span class="layer-pill-title">Climate Risk Options</span>
+            <span class="layer-pill-count">${state.selectedClimateIndicators.size}</span>
+          </summary>
+          <div class="layer-pill-body">
+            ${climateRiskOptionsMarkup()}
+          </div>
+        </details>
+        <details class="layer-legend-pill" data-analysis-role="climate-legend"${climateLegendOpenAttr}>
+          <summary class="layer-pill-summary">
+            <span class="layer-pill-title">Climate Risk Info</span>
+          </summary>
+          <div class="layer-pill-body">${climateRiskInfoMarkup()}</div>
+        </details>
+      </section>
+    `);
+  }
+
+  if (analysisStacks.length === 0 && visibleLayers.length === 0) {
     el.hoverPillRow.classList.add("hidden");
     el.hoverPillRow.innerHTML = "";
     return;
@@ -995,22 +1279,8 @@ function renderLayerStacks() {
       const defaultLegendOpen = layerId === "bivariate_municipalities";
       const legendOpen = state.layerStackOpenLegend[layerId] === true
         || (!Object.prototype.hasOwnProperty.call(state.layerStackOpenLegend, layerId) && defaultLegendOpen);
-      const exceptionalOpen = state.layerStackOpenExceptional[layerId] === true;
       const mainOpenAttr = mainOpen ? " open" : "";
       const legendOpenAttr = legendOpen ? " open" : "";
-      const exceptionalOpenAttr = exceptionalOpen ? " open" : "";
-
-      const exceptionalPill = layerId === "bivariate_municipalities"
-        ? `
-          <details class="layer-exceptional-pill" data-layer="${escapeHtml(layerId)}" data-stack-role="exceptional"${exceptionalOpenAttr}>
-            <summary class="layer-pill-summary">
-              <span class="layer-pill-title">Exceptional Places</span>
-              <span class="layer-pill-count" data-exceptional-count="${escapeHtml(layerId)}">${state.exceptional.size}</span>
-            </summary>
-            <div class="layer-pill-body" data-exceptional-list="${escapeHtml(layerId)}" aria-live="polite"></div>
-          </details>
-        `
-        : "";
 
       return `
         <section class="layer-stack" data-layer-stack="${escapeHtml(layerId)}">
@@ -1028,13 +1298,12 @@ function renderLayerStacks() {
             </summary>
             <div class="layer-pill-body" data-layer-legend="${escapeHtml(layerId)}"></div>
           </details>
-          ${exceptionalPill}
         </section>
       `;
     })
     .join("");
 
-  el.hoverPillRow.innerHTML = stacksHtml;
+  el.hoverPillRow.innerHTML = `${analysisStacks.join("")}${stacksHtml}`;
 
   [...el.hoverPillRow.querySelectorAll("details[data-layer][data-stack-role]")].forEach((node) => {
     node.addEventListener("toggle", () => {
@@ -1043,7 +1312,15 @@ function renderLayerStacks() {
       if (!layerId || !role) return;
       if (role === "main") state.layerStackOpenMain[layerId] = node.open;
       if (role === "legend") state.layerStackOpenLegend[layerId] = node.open;
-      if (role === "exceptional") state.layerStackOpenExceptional[layerId] = node.open;
+    });
+  });
+
+  [...el.hoverPillRow.querySelectorAll("details[data-analysis-role]")].forEach((node) => {
+    node.addEventListener("toggle", () => {
+      const role = node.dataset.analysisRole;
+      if (role === "climate-main") state.analysisStackOpenClimateMain = node.open;
+      if (role === "climate-legend") state.analysisStackOpenClimateLegend = node.open;
+      if (role === "exceptional-main") state.analysisStackOpenExceptional = node.open;
     });
   });
 
@@ -1059,6 +1336,50 @@ function renderLayerStacks() {
       else state.hoverSelectedFields[layerKey].delete(fieldKey);
       refreshTooltips(layerKey);
       renderLayerStacks();
+    });
+  });
+
+  [...el.hoverPillRow.querySelectorAll("button[data-clear-hover-fields]")].forEach((node) => {
+    node.addEventListener("click", () => {
+      const layerKey = node.dataset.clearHoverFields;
+      if (!layerKey) return;
+      state.hoverSelectedFields[layerKey] = new Set();
+      refreshTooltips(layerKey);
+      renderLayerStacks();
+    });
+  });
+
+  [...el.hoverPillRow.querySelectorAll("input[data-climate-indicator]")].forEach((node) => {
+    node.addEventListener("change", () => {
+      const key = node.dataset.climateIndicator;
+      if (!key) return;
+      if (node.checked) state.selectedClimateIndicators.add(key);
+      else state.selectedClimateIndicators.delete(key);
+      renderLayerStacks();
+      if (el.autoUpdate.checked) debounce(() => recompute(false), 350);
+    });
+  });
+
+  [...el.hoverPillRow.querySelectorAll("button[data-clear-climate-indicators]")].forEach((node) => {
+    node.addEventListener("click", () => {
+      state.selectedClimateIndicators = new Set();
+      renderLayerStacks();
+      if (el.autoUpdate.checked) debounce(() => recompute(false), 350);
+    });
+  });
+
+  [...el.hoverPillRow.querySelectorAll("input[data-climate-top-share]")].forEach((node) => {
+    const syncTopShare = () => {
+      state.climateTopSharePct = normalizeClimateTopShare(node.value);
+      node.value = String(state.climateTopSharePct);
+    };
+    node.addEventListener("input", () => {
+      syncTopShare();
+      if (el.autoUpdate.checked) debounce(() => recompute(false), 350);
+    });
+    node.addEventListener("change", () => {
+      syncTopShare();
+      if (!el.autoUpdate.checked) renderLayerStacks();
     });
   });
 
@@ -1090,13 +1411,24 @@ function renderLayerStacks() {
     } else {
       legendMount.innerHTML = compactLegendMarkup(layerId);
     }
-
-    if (layerId === "bivariate_municipalities") {
-      const exceptionalListMount = el.hoverPillRow.querySelector(`[data-exceptional-list="${layerId}"]`);
-      const exceptionalCountMount = el.hoverPillRow.querySelector(`[data-exceptional-count="${layerId}"]`);
-      renderExceptionalPlaces(exceptionalListMount, exceptionalCountMount);
-    }
   });
+
+  renderExceptionalPlaces(
+    el.hoverPillRow.querySelector("[data-analysis-exceptional-list]"),
+    el.hoverPillRow.querySelector("[data-analysis-exceptional-count]"),
+  );
+
+  const exceptionalDownloadBtn = el.hoverPillRow.querySelector("[data-download-exceptional]");
+  if (exceptionalDownloadBtn) {
+    exceptionalDownloadBtn.addEventListener("click", () => {
+      downloadExceptionalCsv();
+    });
+  }
+
+  const restoredClimateScrollNode = el.hoverPillRow.querySelector(".climate-risk-groups");
+  if (restoredClimateScrollNode && state.climateIndicatorScrollTop > 0) {
+    restoredClimateScrollNode.scrollTop = state.climateIndicatorScrollTop;
+  }
 }
 
 function muniStyle(feature) {
@@ -1397,6 +1729,9 @@ function toggleLegendClass(biClass) {
   }
   updateMunicipalityStyles();
   renderLayerStacks();
+  if (el.autoUpdate.checked) {
+    debounce(() => recompute(false), 350);
+  }
 }
 
 function renderLegend(targetNode = null) {
@@ -1419,9 +1754,9 @@ function renderLegend(targetNode = null) {
           type="button"
           class="diamond-cell${active}"
           data-bi-class="${escapeHtml(biClass)}"
-          aria-label="Class ${escapeHtml(biClass)} (${escapeHtml(aria)})"
+          aria-label="Class ${escapeHtml(biClass)} (${escapeHtml(aria)}). Click to whiten and exclude from Stage 1."
           aria-pressed="${active ? "true" : "false"}"
-          title="${escapeHtml(biClass)}: ${escapeHtml(aria)}"
+          title="${escapeHtml(biClass)}: ${escapeHtml(aria)}. Click to whiten and exclude from Stage 1."
           style="background:${escapeHtml(color)}; --grid-row:${gridRow}; --grid-col:${gridCol};"
         >
           <span class="sr-only">${escapeHtml(biClass)}</span>
@@ -1440,7 +1775,7 @@ function renderLegend(targetNode = null) {
         ${cellsHtml}
       </div>
     </div>
-    <p class="legend-caption">Click classes to whiten matching municipalities.</p>
+    <p class="legend-caption">Clicked classes are whitened and excluded from Stage 1.</p>
   `;
 
   [...mount.querySelectorAll("button[data-bi-class]")].forEach((btn) => {
@@ -1453,29 +1788,39 @@ function renderLegend(targetNode = null) {
 function renderExceptionalPlaces(listNode = null, countNode = null) {
   const listMount = listNode;
   const countMount = countNode;
-  const count = state.exceptional.size;
+  const selectedCount = state.exceptional.size;
+  const totalCount = state.exceptionalStage1.size;
   if (countMount) {
-    countMount.textContent = String(count);
+    countMount.textContent = totalCount > 0 ? `${selectedCount} / ${totalCount}` : "0";
   }
   if (!listMount) return;
 
-  if (count === 0) {
+  if (totalCount === 0) {
     listMount.innerHTML = "<p class=\"exceptional-empty\">No exceptional places for current filters.</p>";
     return;
   }
 
-  const rows = [...state.exceptional]
-    .map((bfs) => {
-      const rec = state.records[bfs] || {};
-      const name = String(rec.name || rec.NAME || bfs);
-      const canton = String(rec.canton_name || rec.KANTONSNUM || "").trim();
-      const label = canton ? `${name} (${canton})` : name;
-      return { bfs: String(bfs), label };
-    })
-    .sort((a, b) => a.label.localeCompare(b.label));
+  const rows = exceptionalRows();
 
   const items = rows
-    .map(({ bfs, label }) => `<li>${escapeHtml(label)} [${escapeHtml(bfs)}]</li>`)
+    .map(({ bfs, label, status, climateRiskScore }) => {
+      const statusClass = status === "selected"
+        ? "is-selected"
+        : (status === "missing" ? "is-missing" : "is-filtered-out");
+      const badgeText = status === "selected"
+        ? "Selected"
+        : (status === "missing" ? "No climate data" : "Filtered out");
+      const riskText = Number.isFinite(Number(climateRiskScore))
+        ? Number(climateRiskScore).toFixed(2)
+        : "N/A";
+      return `
+        <li class="exceptional-item ${statusClass}">
+          <span class="exceptional-label">${escapeHtml(label)} [${escapeHtml(bfs)}]</span>
+          <span class="exceptional-meta">Climate risk score: ${escapeHtml(riskText)}</span>
+          <span class="exceptional-badge">${escapeHtml(badgeText)}</span>
+        </li>
+      `;
+    })
     .join("");
   listMount.innerHTML = `<ul class="exceptional-list">${items}</ul>`;
 }
@@ -1799,6 +2144,10 @@ async function recompute(isInitial = false, rethrowOnError = false) {
 
     state.records = data.records || {};
     state.exceptional = new Set((data.exceptional_ids || []).map(String));
+    state.exceptionalStage1 = new Set((data.stage1_exceptional_ids || []).map(String));
+    state.climateStageStatus = data.climate_stage_status || {};
+    state.lastClimateStats = data.stats || {};
+    state.climateStageEnabled = !!state.lastClimateStats.climate_stage_enabled;
 
     refreshHoverSchema("bivariate_municipalities");
 
@@ -1812,7 +2161,23 @@ async function recompute(isInitial = false, rethrowOnError = false) {
 
     const n = Object.keys(state.records).length;
     const e = state.exceptional.size;
-    setStatus(`${n} municipalities, ${e} exceptional`);
+    const stage1 = state.exceptionalStage1.size;
+    const stage1CandidateAfterFilter = Number(state.lastClimateStats.stage1_candidate_record_count_after_filter ?? n);
+    const stage1CandidateExcluded = Number(state.lastClimateStats.stage1_candidate_record_excluded_count ?? 0);
+    const hasStage1ClassExclusion = stage1CandidateExcluded > 0;
+    if (state.climateStageEnabled) {
+      if (hasStage1ClassExclusion) {
+        setStatus(`${n} municipalities, ${stage1} exceptional from ${stage1CandidateAfterFilter} class-filtered candidates, ${e} climate-priority`);
+      } else {
+        setStatus(`${n} municipalities, ${stage1} exceptional after bivariate filters, ${e} climate-priority`);
+      }
+    } else {
+      if (hasStage1ClassExclusion) {
+        setStatus(`${n} municipalities, ${stage1} exceptional from ${stage1CandidateAfterFilter} class-filtered candidates, climate prioritization disabled`);
+      } else {
+        setStatus(`${n} municipalities, ${stage1} exceptional after bivariate filters, climate prioritization disabled`);
+      }
+    }
   } catch (err) {
     setStatus(`Error: ${err.message}`);
     console.error(err);
@@ -1823,7 +2188,15 @@ async function recompute(isInitial = false, rethrowOnError = false) {
 }
 
 function wireAutoUpdateEvents() {
-  [el.season, el.tempMethod, el.nonHabitable, el.kTemp, el.kOld].forEach((node) => {
+  const triggerNodes = [
+    el.season,
+    el.tempMethod,
+    el.nonHabitable,
+    el.kTemp,
+    el.kOld,
+  ].filter(Boolean);
+
+  triggerNodes.forEach((node) => {
     node.addEventListener("change", () => {
       if (el.autoUpdate.checked) debounce(() => recompute(false), 350);
     });
@@ -1886,11 +2259,14 @@ async function boot() {
     initMap();
 
     el.season.value = defaults.season || "annual";
-    el.tempMethod.value = defaults.temp_method || "mean-mean";
+    el.tempMethod.value = defaults.temp_method || "mean-range";
     el.nonHabitable.checked = defaults.exclude_non_habitable !== false;
     el.autoUpdate.checked = defaults.auto_update !== false;
     el.kTemp.value = String(defaults.k_temp ?? 1.0);
     el.kOld.value = String(defaults.k_old ?? 1.0);
+    state.climateIndicatorOptions = Array.isArray(options.climate_indicator_options) ? options.climate_indicator_options : [];
+    state.selectedClimateIndicators = new Set((defaults.climate_indicator_keys || []).map(String));
+    state.climateTopSharePct = normalizeClimateTopShare(defaults.climate_top_share_pct ?? 25);
 
     if (Array.isArray(options.temperature_methods) && options.temperature_methods.length) {
       el.tempMethod.innerHTML = options.temperature_methods

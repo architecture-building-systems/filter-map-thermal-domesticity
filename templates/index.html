@@ -10,7 +10,7 @@
   <link href="https://fonts.googleapis.com/css2?family=Comfortaa:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-  <link rel="stylesheet" href="{{ url_for('static', filename='app.css', v='20260223a') }}" />
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css', v='20260304b') }}" />
 </head>
 <body>
   <div id="app-loader" class="is-visible" role="status" aria-live="polite" aria-label="Application loading">
@@ -48,8 +48,8 @@
         <label>
           Temperature layer
           <select id="temp-method">
-            <option value="mean-mean">mean-mean</option>
             <option value="mean-range">mean-range</option>
+            <option value="mean-mean">mean-mean</option>
             <option value="mean-min">mean-min</option>
             <option value="mean-max">mean-max</option>
           </select>
@@ -105,6 +105,6 @@
   </aside>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <script src="{{ url_for('static', filename='app.js', v='20260223a') }}"></script>
+  <script src="{{ url_for('static', filename='app.js', v='20260304b') }}"></script>
 </body>
 </html>

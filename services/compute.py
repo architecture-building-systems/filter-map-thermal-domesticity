@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Dict, Iterable, Tuple
 
@@ -128,6 +129,81 @@ def compute_exceptional_ids(
         old_cutoff=old_cutoff,
     )
     return exceptional, stats
+
+
+def filter_records_by_bivariate_class(
+    records: Dict[str, Dict[str, float | str | int]],
+    excluded_classes: set[str],
+) -> Tuple[Dict[str, Dict[str, float | str | int]], Dict[str, int | list[str]]]:
+    """Filter candidate records before stage-1 threshold calculation."""
+    normalized_classes = {str(value) for value in excluded_classes if str(value)}
+    pre_count = int(len(records))
+    if not normalized_classes:
+        return records, {
+            "excluded_bivariate_classes": [],
+            "stage1_candidate_record_count_before_filter": pre_count,
+            "stage1_candidate_record_count_after_filter": pre_count,
+            "stage1_candidate_record_excluded_count": 0,
+        }
+
+    filtered_records: Dict[str, Dict[str, float | str | int]] = {}
+    excluded_count = 0
+    for bfs, rec in records.items():
+        bi_class = str(rec.get("bi_class", "") or "")
+        if bi_class and bi_class in normalized_classes:
+            excluded_count += 1
+            continue
+        filtered_records[str(bfs)] = rec
+
+    return filtered_records, {
+        "excluded_bivariate_classes": sorted(normalized_classes),
+        "stage1_candidate_record_count_before_filter": pre_count,
+        "stage1_candidate_record_count_after_filter": int(len(filtered_records)),
+        "stage1_candidate_record_excluded_count": int(excluded_count),
+    }
+
+
+def select_exceptional_ids_by_climate_risk_share(
+    stage1_exceptional_ids: list[str],
+    climate_scores_by_bfs: Dict[str, float],
+    top_share_pct: float,
+) -> Tuple[list[str], Dict[str, str], Dict[str, int | float]]:
+    """Select the top climate-risk share from stage-1 exceptional IDs."""
+    ranked: list[tuple[str, float]] = []
+    status_by_bfs: Dict[str, str] = {}
+    missing_excluded = 0
+
+    for bfs in stage1_exceptional_ids:
+        key = str(bfs)
+        value = climate_scores_by_bfs.get(key)
+        if value is None or not np.isfinite(value):
+            status_by_bfs[key] = "missing"
+            missing_excluded += 1
+            continue
+        ranked.append((key, float(value)))
+
+    ranked.sort(key=lambda item: (-item[1], item[0]))
+
+    valid_count = len(ranked)
+    if valid_count > 0:
+        selected_count = max(1, int(math.ceil(valid_count * (float(top_share_pct) / 100.0))))
+    else:
+        selected_count = 0
+
+    selected_ids = [bfs for bfs, _ in ranked[:selected_count]]
+    selected_set = set(selected_ids)
+
+    for bfs, _score in ranked:
+        status_by_bfs[bfs] = "selected" if bfs in selected_set else "filtered_out"
+
+    stats = {
+        "climate_top_share_pct": float(top_share_pct),
+        "climate_stage_input_count": int(len(stage1_exceptional_ids)),
+        "climate_stage_valid_count": int(valid_count),
+        "climate_stage_output_count": int(len(selected_ids)),
+        "climate_missing_excluded": int(missing_excluded),
+    }
+    return selected_ids, status_by_bfs, stats
 
 
 def label_heating_options(available_codes: Iterable[str]) -> list[dict[str, str]]:

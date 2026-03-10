@@ -216,6 +216,39 @@ body {
   line-height: 1.25;
 }
 
+.field-option-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.45rem;
+}
+
+.field-option-summary {
+  margin: 0;
+  font-size: 0.74rem;
+  color: var(--muted);
+}
+
+.field-option-action {
+  appearance: none;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--text);
+  border-radius: 999px;
+  padding: 0.2rem 0.55rem;
+  font: inherit;
+  font-size: 0.7rem;
+  line-height: 1.2;
+  cursor: pointer;
+}
+
+.field-option-action:hover,
+.field-option-action:focus-visible {
+  border-color: var(--accent);
+  outline: none;
+}
+
 .hover-layer-name {
   display: inline-flex;
   align-items: center;
@@ -263,7 +296,8 @@ body {
   transition: opacity 0s ease, box-shadow 0s ease;
 }
 
-.layer-stack {
+.layer-stack,
+.analysis-stack {
   min-width: clamp(230px, 26vw, 330px);
   max-width: clamp(240px, 32vw, 360px);
   max-height: min(76vh, 760px);
@@ -380,6 +414,94 @@ body {
   font-size: 0.74rem;
   color: var(--muted);
   line-height: 1.3;
+}
+
+.climate-risk-summary {
+  display: grid;
+  gap: 0.45rem;
+  margin-bottom: 0.45rem;
+}
+.climate-risk-summary-text {
+  margin: 0;
+  font-size: 0.74rem;
+  color: var(--muted);
+}
+
+.climate-risk-share-control {
+  display: grid;
+  gap: 0.28rem;
+  font-size: 0.77rem;
+}
+
+.climate-risk-share-control input {
+  width: 100%;
+}
+
+.climate-risk-helper {
+  margin: 0 0 0.55rem;
+  font-size: 0.72rem;
+  line-height: 1.35;
+  color: var(--muted);
+}
+
+.climate-risk-groups {
+  display: grid;
+  gap: 0.55rem;
+  max-height: 240px;
+  overflow: auto;
+  padding-right: 0.1rem;
+}
+
+.climate-risk-group {
+  display: grid;
+  gap: 0.3rem;
+}
+
+.climate-risk-group h4 {
+  margin: 0;
+  font-size: 0.7rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.climate-risk-fields {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.climate-risk-fields label {
+  display: inline-flex;
+  align-items: flex-start;
+  gap: 0.4rem;
+  font-size: 0.75rem;
+  line-height: 1.3;
+}
+
+.climate-risk-info {
+  display: grid;
+  gap: 0.45rem;
+  font-size: 0.73rem;
+  line-height: 1.4;
+}
+
+.climate-risk-info p {
+  margin: 0;
+}
+
+.climate-risk-note {
+  color: var(--muted);
+}
+
+.climate-risk-note strong {
+  color: var(--text);
+}
+
+.climate-risk-note-list {
+  margin: 0.25rem 0 0;
+  padding-left: 1rem;
+  display: grid;
+  gap: 0.18rem;
 }
 
 .layer-opacity-row {
@@ -755,14 +877,94 @@ input[type="checkbox"] {
 
 .exceptional-list {
   margin: 0;
-  padding: 0.3rem 0.55rem 0.5rem 1.1rem;
+  padding: 0.3rem 0.55rem 0.5rem;
+  list-style: none;
   display: grid;
-  gap: 0.2rem;
+  gap: 0.32rem;
 }
 
-.exceptional-list li {
+.exceptional-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  padding: 0 0.05rem 0.35rem;
+}
+
+.exceptional-download {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 0.38rem 0.6rem;
+  font: inherit;
+  font-size: 0.7rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.exceptional-download:hover,
+.exceptional-download:focus-visible {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.exceptional-download:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.exceptional-item {
+  display: grid;
+  gap: 0.12rem;
+  padding: 0.42rem 0.48rem;
+  border: 1px solid color-mix(in srgb, var(--line) 88%, #fff 12%);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--surface) 95%, var(--bg) 5%);
   font-size: 0.71rem;
-  line-height: 1.25;
+  line-height: 1.3;
+}
+
+.exceptional-item.is-selected {
+  color: var(--text);
+}
+
+.exceptional-item.is-filtered-out,
+.exceptional-item.is-missing {
+  color: var(--muted);
+  opacity: 0.72;
+}
+
+.exceptional-item.is-missing .exceptional-meta {
+  font-style: italic;
+}
+
+.exceptional-label {
+  font-weight: 700;
+}
+
+.exceptional-meta {
+  font-size: 0.68rem;
+  color: inherit;
+}
+
+.exceptional-badge {
+  justify-self: start;
+  padding: 0.14rem 0.38rem;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--line) 88%, #000 12%);
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  background: color-mix(in srgb, var(--surface) 90%, var(--bg) 10%);
+}
+
+.exceptional-item.is-selected .exceptional-badge {
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--line) 50%);
+  background: color-mix(in srgb, var(--accent) 18%, var(--surface) 82%);
+}
+
+.exceptional-item.is-filtered-out .exceptional-badge,
+.exceptional-item.is-missing .exceptional-badge {
+  border-color: color-mix(in srgb, var(--line) 92%, #000 8%);
 }
 
 .exceptional-empty {
@@ -1029,7 +1231,8 @@ input[type="checkbox"] {
     max-height: 140px;
   }
 
-  .layer-stack {
+  .layer-stack,
+  .analysis-stack {
     min-width: 220px;
     max-width: 280px;
     max-height: 46vh;

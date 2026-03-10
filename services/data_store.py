@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import gzip
 from datetime import date, datetime
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable
@@ -16,6 +18,7 @@ from rasterio.features import rasterize
 from rasterio.io import MemoryFile
 from rasterio.warp import transform_bounds
 
+from .climate_metrics import default_indicator_keys, get_climate_indicator_options
 from .compute import label_heating_options
 
 
@@ -80,6 +83,9 @@ class DataStore:
         self.background_dir = base_dir / "background_data"
         self.temp_dir = self.background_dir / "temperature_rasters"
         self.proposal_dir = base_dir.parent
+        self.cache_dir = base_dir / ".cache"
+        self.muni_simplify_tolerance = _safe_float(os.environ.get("MUNI_SIMPLIFY_TOL"), 0.0012)
+        self.muni_simplify_tolerance = max(0.0005, min(self.muni_simplify_tolerance, 0.01))
 
         self.ready = False
         self.bootstrap_core_payload: dict = {}
@@ -88,6 +94,10 @@ class DataStore:
         self.overlay_payloads: dict[str, dict] = {}
         self.overlay_manifest: dict[str, dict] = {}
         self.metadata_by_bfs: dict[str, dict] = {}
+        self.climate_risk_by_bfs: dict[str, float] = {}
+        self.climate_indicator_frame: pd.DataFrame = pd.DataFrame()
+        self.climate_indicator_options: list[dict[str, str | bool]] = []
+        self.default_climate_indicator_keys: list[str] = []
         self.temperature_cache: dict[tuple[str, str, bool], dict[str, float]] = {}
         self.heating_records: dict[str, HeatingAgeRecord] = {}
         self.heating_codes: set[str] = set()
@@ -118,7 +128,10 @@ class DataStore:
         muni_gdf["BFS_NUMMER"] = muni_gdf["BFS_NUMMER"].astype(int)
         self._bfs_ids = sorted(muni_gdf["BFS_NUMMER"].unique().tolist())
 
-        self.metadata_by_bfs = self._build_metadata(muni_gdf)
+        self.metadata_by_bfs, self.climate_risk_by_bfs = self._build_metadata(muni_gdf)
+        self.climate_indicator_frame = self._build_climate_indicator_frame(muni_gdf)
+        self.climate_indicator_options = get_climate_indicator_options(self.climate_indicator_frame.columns)
+        self.default_climate_indicator_keys = default_indicator_keys(self.climate_indicator_frame.columns)
 
         self._prepare_label_raster(muni_gdf)
         self._precompute_temperature_aggregates()
@@ -128,23 +141,41 @@ class DataStore:
         self.overlay_payloads = {}
         self.overlay_manifest = self._build_overlay_manifest(self.overlay_specs)
 
-        self.bootstrap_core_payload = self._build_bootstrap_payload(muni_gdf)
+        self.bootstrap_core_payload = self._build_bootstrap_payload(muni_gdf, muni_path)
         # Backward-compatible alias used by current API handler.
         self.bootstrap_payload = self.bootstrap_core_payload
         self.ready = True
 
-    def _build_metadata(self, gdf: gpd.GeoDataFrame) -> dict[str, dict]:
+    def _build_metadata(self, gdf: gpd.GeoDataFrame) -> tuple[dict[str, dict], dict[str, float]]:
         out: dict[str, dict] = {}
+        climate_risk_by_bfs: dict[str, float] = {}
         for _, row in gdf.iterrows():
             bfs = str(int(row["BFS_NUMMER"]))
             canton_num = int(row["KANTONSNUM"]) if row.get("KANTONSNUM") is not None else 0
-            out[bfs] = {
+            rec = {
                 "bfs": bfs,
                 "name": str(row.get("NAME", bfs)),
                 "canton_num": canton_num,
                 "canton_name": self.CANTON_NAMES.get(canton_num, str(canton_num)),
             }
-        return out
+            climate_risk = _safe_float(row.get("climate_risk_gwl3.0"), float("nan"))
+            if np.isfinite(climate_risk):
+                rec["climate_risk_gwl3.0"] = float(climate_risk)
+                climate_risk_by_bfs[bfs] = float(climate_risk)
+            out[bfs] = rec
+        return out, climate_risk_by_bfs
+
+    def _build_climate_indicator_frame(self, gdf: gpd.GeoDataFrame) -> pd.DataFrame:
+        indicator_cols = [item["key"] for item in get_climate_indicator_options(gdf.columns)]
+        if not indicator_cols:
+            return pd.DataFrame(index=[str(int(v)) for v in gdf["BFS_NUMMER"].tolist()])
+
+        frame = gdf[["BFS_NUMMER", *indicator_cols]].copy()
+        frame["BFS_NUMMER"] = frame["BFS_NUMMER"].astype(int).astype(str)
+        for col in indicator_cols:
+            frame[col] = pd.to_numeric(frame[col], errors="coerce")
+        frame = frame.set_index("BFS_NUMMER").sort_index()
+        return frame
 
     def _prepare_label_raster(self, muni_gdf: gpd.GeoDataFrame) -> None:
         pop_path = self.background_dir / "06_population_mask.tif"
@@ -410,28 +441,66 @@ class DataStore:
 
         return payload
 
-    def _build_bootstrap_payload(self, muni_gdf: gpd.GeoDataFrame) -> dict:
-        muni_out = muni_gdf.to_crs(epsg=4326).copy()
-        muni_out["geometry"] = muni_out.geometry.simplify(0.0008)
-
-        keep_cols = [
+    def _municipality_keep_columns(self) -> list[str]:
+        return [
             "BFS_NUMMER",
             "NAME",
             "KANTONSNUM",
-            "temperature_mean-mean",
-            "temperature_mean-range",
-            "temperature_mean-min",
-            "temperature_mean-max",
-            "temperature_winter_mean-mean",
-            "temperature_winter_mean-range",
-            "temperature_winter_mean-min",
-            "temperature_winter_mean-max",
-            "older_than_1919_pct_original_system",
-            "population_coverage_pct",
         ]
+
+    def _municipality_cache_signature(self, source_path: Path, keep_cols: list[str]) -> dict:
+        stat = source_path.stat()
+        return {
+            "version": 2,
+            "source_path": str(source_path),
+            "source_mtime_ns": int(stat.st_mtime_ns),
+            "source_size": int(stat.st_size),
+            "simplify_tolerance": float(self.muni_simplify_tolerance),
+            "columns": keep_cols,
+        }
+
+    def _municipality_cache_paths(self) -> tuple[Path, Path]:
+        return (
+            self.cache_dir / "municipalities_bootstrap.geojson.gz",
+            self.cache_dir / "municipalities_bootstrap.meta.json",
+        )
+
+    def _build_municipality_geojson(self, muni_gdf: gpd.GeoDataFrame, keep_cols: list[str]) -> dict:
+        muni_out = muni_gdf.to_crs(epsg=4326).copy()
+        muni_out["geometry"] = muni_out.geometry.simplify(self.muni_simplify_tolerance)
         keep_cols = [c for c in keep_cols if c in muni_out.columns]
         muni_safe = self._sanitize_for_json(muni_out[keep_cols + ["geometry"]])
-        muni_geojson = json.loads(muni_safe.to_json())
+        return json.loads(muni_safe.to_json())
+
+    def _load_or_build_municipality_geojson(self, muni_gdf: gpd.GeoDataFrame, source_path: Path) -> dict:
+        keep_cols = self._municipality_keep_columns()
+        signature = self._municipality_cache_signature(source_path, keep_cols)
+        cache_geojson_path, cache_meta_path = self._municipality_cache_paths()
+
+        if cache_geojson_path.exists() and cache_meta_path.exists():
+            try:
+                meta = json.loads(cache_meta_path.read_text())
+                if meta == signature:
+                    with gzip.open(cache_geojson_path, "rt", encoding="utf-8") as fh:
+                        cached = json.load(fh)
+                    if isinstance(cached, dict) and cached.get("type") == "FeatureCollection":
+                        return cached
+            except Exception as exc:
+                self.load_warnings.append(f"Municipality cache ignored: {exc}")
+
+        muni_geojson = self._build_municipality_geojson(muni_gdf, keep_cols)
+        try:
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+            with gzip.open(cache_geojson_path, "wt", encoding="utf-8", compresslevel=6) as fh:
+                json.dump(muni_geojson, fh, separators=(",", ":"), ensure_ascii=False)
+            cache_meta_path.write_text(json.dumps(signature, separators=(",", ":"), ensure_ascii=False))
+        except Exception as exc:
+            self.load_warnings.append(f"Municipality cache write skipped: {exc}")
+
+        return muni_geojson
+
+    def _build_bootstrap_payload(self, muni_gdf: gpd.GeoDataFrame, source_path: Path) -> dict:
+        muni_geojson = self._load_or_build_municipality_geojson(muni_gdf, source_path)
 
         return {
             "municipalities": muni_geojson,
@@ -443,13 +512,16 @@ class DataStore:
                 "seasons": ["annual", "winter"],
                 "temperature_methods": ["mean-mean", "mean-range", "mean-min", "mean-max"],
                 "heating_options": label_heating_options(self.heating_codes),
+                "climate_indicator_options": self.climate_indicator_options,
                 "defaults": {
                     "season": "annual",
-                    "temp_method": "mean-mean",
+                    "temp_method": "mean-range",
                     "exclude_non_habitable": True,
                     "excluded_heating_types": ["1", "7"],
                     "k_temp": 1.0,
                     "k_old": 1.0,
+                    "climate_indicator_keys": self.default_climate_indicator_keys,
+                    "climate_top_share_pct": 25,
                     "auto_update": True,
                     "layer_order": [
                         "national_border",
@@ -649,8 +721,8 @@ class DataStore:
         return out
 
 
-def _safe_float(v) -> float:
+def _safe_float(v, default: float = 0.0) -> float:
     try:
         return float(v)
     except Exception:
-        return 0.0
+        return float(default)
