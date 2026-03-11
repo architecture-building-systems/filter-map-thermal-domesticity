@@ -24,7 +24,7 @@ body {
   background: var(--bg);
   color: var(--text);
   font-family: "Comfortaa", sans-serif;
-  font-size: 16px;
+  font-size: 15px;
   -webkit-text-size-adjust: 100%;
   text-size-adjust: 100%;
 }
@@ -355,7 +355,7 @@ body {
 .layer-exceptional-pill {
   width: 100%;
   opacity: var(--control-pill-opacity);
-  max-height: min(32vh, 360px);
+  max-height: min(40vh, 450px);
   overflow: hidden;
   background: var(--surface);
   border: 1px solid var(--line);
@@ -600,6 +600,22 @@ body {
   padding-left: 1rem;
   display: grid;
   gap: 0.18rem;
+}
+
+.flow-toggle-list {
+  margin-top: 0.15rem;
+  padding-top: 0.35rem;
+  border-top: 1px solid var(--line);
+  display: grid;
+  gap: 0.32rem;
+}
+
+.flow-toggle-list label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.42rem;
+  font-size: 0.74rem;
+  line-height: 1.25;
 }
 
 .layer-opacity-row {

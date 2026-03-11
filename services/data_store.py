@@ -99,6 +99,8 @@ class DataStore:
         self.climate_indicator_options: list[dict[str, str | bool]] = []
         self.default_climate_indicator_keys: list[str] = []
         self.building_material_zone_options: list[dict[str, str | int]] = []
+        self.hearth_system_zone_options: list[dict[str, str]] = []
+        self.hearth_system_zone_values: set[str] = set()
         self.temperature_cache: dict[tuple[str, str, bool], dict[str, float]] = {}
         self.heating_records: dict[str, HeatingAgeRecord] = {}
         self.heating_codes: set[str] = set()
@@ -134,6 +136,12 @@ class DataStore:
         self.climate_indicator_options = get_climate_indicator_options(self.climate_indicator_frame.columns)
         self.default_climate_indicator_keys = default_indicator_keys(self.climate_indicator_frame.columns)
         self.building_material_zone_options = self._build_material_zone_options(muni_gdf)
+        self.hearth_system_zone_options = self._build_hearth_zone_options(muni_gdf)
+        self.hearth_system_zone_values = {
+            str(item.get("zone_label", "")).strip()
+            for item in self.hearth_system_zone_options
+            if str(item.get("zone_label", "")).strip()
+        }
 
         self._prepare_label_raster(muni_gdf)
         self._precompute_temperature_aggregates()
@@ -171,6 +179,16 @@ class DataStore:
                 rec["building_material_zone_number"] = int(zone_number)
             if zone_label:
                 rec["building_material_zone"] = zone_label
+
+            hearth_label = _normalize_label(row.get("hearth_system_zone"))
+            hearth_code = _normalize_label(row.get("hearth_system_zone_number"))
+            material_hearth_zone = _normalize_label(row.get("material+hearth_zone"))
+            if hearth_label:
+                rec["hearth_system_zone"] = hearth_label
+            if hearth_code:
+                rec["hearth_system_zone_number"] = hearth_code
+            if material_hearth_zone:
+                rec["material+hearth_zone"] = material_hearth_zone
             out[bfs] = rec
         return out, climate_risk_by_bfs
 
@@ -208,6 +226,22 @@ class DataStore:
             frame[col] = pd.to_numeric(frame[col], errors="coerce")
         frame = frame.set_index("BFS_NUMMER").sort_index()
         return frame
+
+    def _build_hearth_zone_options(self, gdf: gpd.GeoDataFrame) -> list[dict[str, str]]:
+        if "hearth_system_zone" not in gdf.columns:
+            return []
+
+        seen: set[str] = set()
+        out: list[str] = []
+        for _, row in gdf.iterrows():
+            label = _normalize_label(row.get("hearth_system_zone"))
+            if not label or label in seen:
+                continue
+            seen.add(label)
+            out.append(label)
+
+        out.sort(key=lambda value: value.lower())
+        return [{"zone_label": str(label)} for label in out]
 
     def _prepare_label_raster(self, muni_gdf: gpd.GeoDataFrame) -> None:
         pop_path = self.background_dir / "06_population_mask.tif"
@@ -546,6 +580,7 @@ class DataStore:
                 "heating_options": label_heating_options(self.heating_codes),
                 "climate_indicator_options": self.climate_indicator_options,
                 "building_material_zone_options": self.building_material_zone_options,
+                "hearth_system_zone_options": self.hearth_system_zone_options,
                 "defaults": {
                     "season": "annual",
                     "temp_method": "mean-range",
@@ -557,6 +592,10 @@ class DataStore:
                     "climate_top_share_pct": 25,
                     "municipality_display_mode": "bivariate",
                     "selected_building_material_zone_numbers": [],
+                    "selected_hearth_system_zones": [],
+                    "apply_material_filter": True,
+                    "apply_hearth_filter": True,
+                    "apply_climate_priority": True,
                     "auto_update": True,
                     "layer_order": [
                         "national_border",
@@ -772,3 +811,9 @@ def _safe_int(v, default: int | None = 0) -> int | None:
         return int(float(v))
     except Exception:
         return default
+
+
+def _normalize_label(v) -> str:
+    if v is None:
+        return ""
+    return str(v).strip()

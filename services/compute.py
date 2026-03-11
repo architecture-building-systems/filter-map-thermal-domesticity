@@ -163,6 +163,107 @@ def filter_records_by_bivariate_class(
     }
 
 
+def compute_stage1_severity_scores(
+    records: Dict[str, Dict[str, float | str | int]],
+    stats: ExceptionalStats,
+    temp_extreme: str = "low",
+) -> Dict[str, float]:
+    """Rank Stage-1 exceptionals by threshold exceedance severity.
+
+    Score combines temperature and old-building distances beyond Stage-1 cutoffs,
+    standardized by each variable's standard deviation.
+    """
+    out: Dict[str, float] = {}
+    temp_scale = abs(float(stats.temp_std)) if np.isfinite(stats.temp_std) and abs(float(stats.temp_std)) > 0 else 1.0
+    old_scale = abs(float(stats.old_std)) if np.isfinite(stats.old_std) and abs(float(stats.old_std)) > 0 else 1.0
+
+    for bfs, rec in records.items():
+        try:
+            temp = float(rec.get("temp"))  # type: ignore[arg-type]
+            old = float(rec.get("pct_old1919"))  # type: ignore[arg-type]
+        except Exception:
+            continue
+        if not np.isfinite(temp) or not np.isfinite(old):
+            continue
+
+        if temp_extreme == "high":
+            temp_gap = (temp - float(stats.temp_cutoff)) / temp_scale
+        else:
+            temp_gap = (float(stats.temp_cutoff) - temp) / temp_scale
+        old_gap = (old - float(stats.old_cutoff)) / old_scale
+        severity = max(0.0, float(temp_gap)) + max(0.0, float(old_gap))
+        out[str(bfs)] = float(severity)
+    return out
+
+
+def _normalize_group_value(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        cleaned = value.strip()
+        return cleaned if cleaned else None
+    return value
+
+
+def _group_order_key(value: Any) -> tuple[int, str]:
+    if value is None:
+        return (1, "zzzz")
+    if isinstance(value, (int, float)):
+        return (0, f"{float(value):020.6f}")
+    return (0, str(value).lower())
+
+
+def select_top_n_by_group(
+    candidate_ids: list[str],
+    group_value_by_bfs: Dict[str, Any],
+    rank_score_by_bfs: Dict[str, float],
+    top_n: int,
+    selected_groups: set[Any] | None = None,
+    group_field_name: str = "group_value",
+) -> tuple[list[str], dict[str, Any]]:
+    """Select top N candidates separately for each group."""
+    per_group: Dict[Any, list[tuple[str, float]]] = {}
+    normalized_selected = (
+        {_normalize_group_value(v) for v in selected_groups}
+        if selected_groups is not None and len(selected_groups) > 0
+        else None
+    )
+
+    for bfs in candidate_ids:
+        key = str(bfs)
+        group_key = _normalize_group_value(group_value_by_bfs.get(key))
+        if normalized_selected is not None and group_key not in normalized_selected:
+            continue
+        score = rank_score_by_bfs.get(key, float("-inf"))
+        if not np.isfinite(score):
+            score = float("-inf")
+        per_group.setdefault(group_key, []).append((key, float(score)))
+
+    selected_ids: list[str] = []
+    group_counts: list[dict[str, Any]] = []
+    for group_key in sorted(per_group.keys(), key=_group_order_key):
+        ranked = per_group[group_key]
+        ranked.sort(key=lambda item: (-item[1], item[0]))
+        keep_count = min(max(0, int(top_n)), len(ranked))
+        keep_ids = [bfs for bfs, _score in ranked[:keep_count]]
+        selected_ids.extend(keep_ids)
+        group_counts.append(
+            {
+                group_field_name: group_key,
+                "input_count": int(len(ranked)),
+                "selected_count": int(len(keep_ids)),
+            }
+        )
+
+    return selected_ids, {
+        "input_count": int(len(candidate_ids)),
+        "eligible_count": int(sum(len(items) for items in per_group.values())),
+        "selected_count": int(len(selected_ids)),
+        "top_n_per_group": int(max(0, int(top_n))),
+        "group_counts": group_counts,
+    }
+
+
 def select_exceptional_ids_by_climate_risk_share(
     stage1_exceptional_ids: list[str],
     climate_scores_by_bfs: Dict[str, float],
@@ -206,15 +307,17 @@ def select_exceptional_ids_by_climate_risk_share(
     return selected_ids, status_by_bfs, stats
 
 
-def select_exceptional_ids_by_climate_risk_share_per_zone(
+def select_exceptional_ids_by_climate_risk_share_per_group(
     stage1_exceptional_ids: list[str],
     climate_scores_by_bfs: Dict[str, float],
     top_share_pct: float,
-    zone_number_by_bfs: Dict[str, int | None],
+    group_value_by_bfs: Dict[str, Any],
+    scope_name: str = "per_group",
+    group_field_name: str = "group_value",
 ) -> Tuple[list[str], Dict[str, str], Dict[str, int | float | str | list[dict[str, Any]]]]:
-    """Select top climate-risk share separately inside each building-material zone."""
+    """Select top climate-risk share separately inside each group."""
     status_by_bfs: Dict[str, str] = {}
-    ranked_by_zone: Dict[int | None, list[tuple[str, float]]] = {}
+    ranked_by_group: Dict[str | None, list[tuple[str, float]]] = {}
     missing_excluded = 0
 
     for bfs in stage1_exceptional_ids:
@@ -224,16 +327,22 @@ def select_exceptional_ids_by_climate_risk_share_per_zone(
             status_by_bfs[key] = "missing"
             missing_excluded += 1
             continue
-        zone_key = zone_number_by_bfs.get(key)
-        ranked_by_zone.setdefault(zone_key, []).append((key, float(value)))
+        raw_group = group_value_by_bfs.get(key)
+        group_key = None if raw_group is None else str(raw_group).strip()
+        if group_key == "":
+            group_key = None
+        ranked_by_group.setdefault(group_key, []).append((key, float(value)))
 
     selected_ids: list[str] = []
     total_valid_count = 0
-    per_zone_counts: list[dict[str, Any]] = []
-    ordered_zone_keys = sorted(ranked_by_zone.keys(), key=lambda value: (value is None, value if value is not None else 0))
+    per_group_counts: list[dict[str, Any]] = []
+    ordered_group_keys = sorted(
+        ranked_by_group.keys(),
+        key=lambda value: (value is None, (value or "").lower()),
+    )
 
-    for zone_key in ordered_zone_keys:
-        ranked = ranked_by_zone.get(zone_key, [])
+    for group_key in ordered_group_keys:
+        ranked = ranked_by_group.get(group_key, [])
         ranked.sort(key=lambda item: (-item[1], item[0]))
         valid_count = len(ranked)
         total_valid_count += valid_count
@@ -242,31 +351,48 @@ def select_exceptional_ids_by_climate_risk_share_per_zone(
         else:
             selected_count = 0
 
-        selected_zone_ids = [bfs for bfs, _ in ranked[:selected_count]]
-        selected_zone_set = set(selected_zone_ids)
-        selected_ids.extend(selected_zone_ids)
+        selected_group_ids = [bfs for bfs, _ in ranked[:selected_count]]
+        selected_group_set = set(selected_group_ids)
+        selected_ids.extend(selected_group_ids)
         for bfs, _score in ranked:
-            status_by_bfs[bfs] = "selected" if bfs in selected_zone_set else "filtered_out"
+            status_by_bfs[bfs] = "selected" if bfs in selected_group_set else "filtered_out"
 
-        per_zone_counts.append(
+        per_group_counts.append(
             {
-                "zone_number": zone_key,
-                "stage1_valid_count": int(valid_count),
-                "selected_count": int(len(selected_zone_ids)),
+                group_field_name: group_key,
+                "valid_count": int(valid_count),
+                "selected_count": int(len(selected_group_ids)),
             }
         )
 
     stats = {
-        "climate_selection_scope": "per_building_material_zone",
+        "climate_selection_scope": str(scope_name),
         "climate_top_share_pct": float(top_share_pct),
         "climate_stage_input_count": int(len(stage1_exceptional_ids)),
         "climate_stage_valid_count": int(total_valid_count),
         "climate_stage_output_count": int(len(selected_ids)),
         "climate_missing_excluded": int(missing_excluded),
-        "climate_stage_zone_counts": per_zone_counts,
-        "climate_stage_zone_count": int(len(per_zone_counts)),
+        "climate_stage_group_counts": per_group_counts,
+        "climate_stage_group_count": int(len(per_group_counts)),
     }
     return selected_ids, status_by_bfs, stats
+
+
+def select_exceptional_ids_by_climate_risk_share_per_zone(
+    stage1_exceptional_ids: list[str],
+    climate_scores_by_bfs: Dict[str, float],
+    top_share_pct: float,
+    zone_number_by_bfs: Dict[str, int | None],
+) -> Tuple[list[str], Dict[str, str], Dict[str, int | float | str | list[dict[str, Any]]]]:
+    """Backward-compatible wrapper for zone-based climate-priority selection."""
+    return select_exceptional_ids_by_climate_risk_share_per_group(
+        stage1_exceptional_ids=stage1_exceptional_ids,
+        climate_scores_by_bfs=climate_scores_by_bfs,
+        top_share_pct=top_share_pct,
+        group_value_by_bfs=zone_number_by_bfs,
+        scope_name="per_building_material_zone",
+        group_field_name="building_material_zone_number",
+    )
 
 
 def label_heating_options(available_codes: Iterable[str]) -> list[dict[str, str]]:
