@@ -39,6 +39,8 @@ _compression_backend = "flask-compress" if Compress is not None else "manual-gzi
 _load_error: str | None = None
 _json_response_cache: dict[str, tuple[bytes, str, bytes, str]] = {}
 _binary_etag_cache: dict[str, str] = {}
+_load_thread: threading.Thread | None = None
+_load_thread_lock = threading.Lock()
 
 
 def _background_load() -> None:
@@ -51,7 +53,16 @@ def _background_load() -> None:
         _load_error = str(exc)
 
 
-threading.Thread(target=_background_load, daemon=True).start()
+def _ensure_background_load_started() -> None:
+    """Start datastore loader in the current process if needed."""
+    global _load_thread
+    if store.ready or _load_error:
+        return
+    with _load_thread_lock:
+        if _load_thread is not None and _load_thread.is_alive():
+            return
+        _load_thread = threading.Thread(target=_background_load, daemon=True, name="datastore-loader")
+        _load_thread.start()
 
 VALID_SEASONS = {"annual", "winter"}
 VALID_TEMP_METHODS = {"mean-mean", "mean-range", "mean-min", "mean-max"}
@@ -188,11 +199,13 @@ def _parse_zone_number(value) -> int | None:
 
 @app.route("/")
 def index():
+    _ensure_background_load_started()
     return render_template("index.html")
 
 
 @app.route("/health")
 def health():
+    _ensure_background_load_started()
     status = {
         "ready": store.ready,
         "loading": not store.ready and _load_error is None,
@@ -207,6 +220,7 @@ def health():
 
 @app.route("/api/bootstrap")
 def api_bootstrap():
+    _ensure_background_load_started()
     if _load_error:
         return jsonify({"error": _load_error}), 500
     if not store.ready:
@@ -216,6 +230,7 @@ def api_bootstrap():
 
 @app.route("/api/overlay/<layer_id>")
 def api_overlay(layer_id: str):
+    _ensure_background_load_started()
     if _load_error:
         return jsonify({"error": _load_error}), 500
     if not store.ready:
@@ -230,6 +245,7 @@ def api_overlay(layer_id: str):
 
 @app.route("/api/raster/<layer_id>.png")
 def api_raster(layer_id: str):
+    _ensure_background_load_started()
     if _load_error:
         return jsonify({"error": _load_error}), 500
     if not store.ready:
@@ -249,6 +265,7 @@ def api_raster(layer_id: str):
 
 @app.route("/api/recompute", methods=["POST"])
 def api_recompute():
+    _ensure_background_load_started()
     if _load_error:
         return jsonify({"error": _load_error}), 500
     if not store.ready:

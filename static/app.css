@@ -7,7 +7,7 @@
   --map-fill-default: #bdbdbd;
   --accent: #FBD124;
   --control-column-width: min(360px, calc(100vw - 2rem));
-  --control-pill-opacity: 0.35;
+  --control-pill-opacity: 0.85;
   --control-pill-opacity-open: 1;
 }
 
@@ -24,7 +24,7 @@ body {
   background: var(--bg);
   color: var(--text);
   font-family: "Comfortaa", sans-serif;
-  font-size: 15px;
+  font-size: 13px;
   -webkit-text-size-adjust: 100%;
   text-size-adjust: 100%;
 }

@@ -6,6 +6,7 @@ import gzip
 from datetime import date, datetime
 import json
 import os
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable
@@ -14,6 +15,7 @@ import geopandas as gpd
 import numpy as np
 import pandas as pd
 import rasterio
+from rasterio.errors import NotGeoreferencedWarning
 from rasterio.features import rasterize
 from rasterio.io import MemoryFile
 from rasterio.warp import transform_bounds
@@ -704,11 +706,12 @@ class DataStore:
         clipped = np.clip(a, vmin, vmax)
         denom = max(vmax - vmin, 1e-9)
         norm = np.clip((clipped - vmin) / denom, 0.0, 1.0)
+        norm_valid = np.where(valid, norm, 0.0)
 
         if style == "population":
-            rgb = self._inferno_like_rgb(norm)
+            rgb = self._inferno_like_rgb(norm_valid)
         else:
-            gray = np.round(norm * 255.0).astype(np.uint8)
+            gray = np.round(norm_valid * 255.0).astype(np.uint8)
             rgb = np.stack([gray, gray, gray], axis=-1)
 
         alpha_u8 = np.zeros(a.shape, dtype=np.uint8)
@@ -730,20 +733,23 @@ class DataStore:
             dtype=np.float32,
         )
         pos = np.linspace(0.0, 1.0, anchors.shape[0], dtype=np.float32)
-        flat = norm.reshape(-1).astype(np.float32)
+        flat = np.nan_to_num(norm.reshape(-1).astype(np.float32), nan=0.0, posinf=1.0, neginf=0.0)
         out = np.empty((flat.shape[0], 3), dtype=np.float32)
         for i in range(3):
             out[:, i] = np.interp(flat, pos, anchors[:, i])
+        out = np.nan_to_num(out, nan=0.0, posinf=255.0, neginf=0.0)
         return np.round(out).astype(np.uint8).reshape(norm.shape + (3,))
 
     def _encode_png_rgba(self, rgba: np.ndarray) -> bytes:
         h, w, _ = rgba.shape
         with MemoryFile() as mem:
-            with mem.open(driver="PNG", width=w, height=h, count=4, dtype="uint8") as dst:
-                dst.write(rgba[:, :, 0], 1)
-                dst.write(rgba[:, :, 1], 2)
-                dst.write(rgba[:, :, 2], 3)
-                dst.write(rgba[:, :, 3], 4)
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category=NotGeoreferencedWarning)
+                with mem.open(driver="PNG", width=w, height=h, count=4, dtype="uint8") as dst:
+                    dst.write(rgba[:, :, 0], 1)
+                    dst.write(rgba[:, :, 1], 2)
+                    dst.write(rgba[:, :, 2], 3)
+                    dst.write(rgba[:, :, 3], 4)
             return mem.read()
 
     def _resolve_isos_path(self) -> Path:
