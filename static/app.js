@@ -53,6 +53,7 @@ const state = {
   isZoomingMap: false,
   bootHintTimer: null,
   topRowNavWired: false,
+  cantonsColorMode: false,
   bioregionColorMap: {},
   bioregionOrder: [],
   bioregionPatternReady: false,
@@ -111,6 +112,62 @@ const HEARTH_SHORT_BY_CODE = {
   E: "Stone-ring hearth",
   F: "Tuff-vault hearth",
   G: "Masonry chimney",
+};
+const CANTON_NAME_BY_NUM = {
+  1: "Zurich",
+  2: "Bern",
+  3: "Luzern",
+  4: "Uri",
+  5: "Schwyz",
+  6: "Obwalden",
+  7: "Nidwalden",
+  8: "Glarus",
+  9: "Zug",
+  10: "Freiburg",
+  11: "Solothurn",
+  12: "Basel-Stadt",
+  13: "Basel-Landschaft",
+  14: "Schaffhausen",
+  15: "Appenzell Ausserrhoden",
+  16: "Appenzell",
+  17: "Sankt Gallen",
+  18: "Graubunden",
+  19: "Aargau",
+  20: "Thurgau",
+  21: "Tessin",
+  22: "Waadt",
+  23: "Wallis",
+  24: "Neuenberg",
+  25: "Genf",
+  26: "Jura",
+};
+const CANTON_COLOR_BY_NUM = {
+  1: "#F0A3FF",
+  2: "#0075DC",
+  3: "#993F00",
+  4: "#4C005C",
+  5: "#191919",
+  6: "#005C31",
+  7: "#2BCE48",
+  8: "#FFCC99",
+  9: "#808080",
+  10: "#94FFB5",
+  11: "#8F7C00",
+  12: "#9DCC00",
+  13: "#C20088",
+  14: "#003380",
+  15: "#19A405",
+  16: "#FFA8BB",
+  17: "#426600",
+  18: "#FF0010",
+  19: "#5EF1F2",
+  20: "#00998F",
+  21: "#E0FF66",
+  22: "#100AFF",
+  23: "#990000",
+  24: "#FFFF80",
+  25: "#FFE100",
+  26: "#FF5000",
 };
 
 const LAYER_DEFAULT_ORDER = [
@@ -246,7 +303,7 @@ const LAYER_LEGEND_NOTES = {
   municipality_bounds: "White municipality polygons with light black boundaries.",
   elevation: "Grayscale heightfield overlay (transparent for no-data). Range shown: 0 to 4000.",
   population: "Aggregated population heat overlay (transparent for no-data). Values clipped to 0 to 200.",
-  cantons: "Canton boundary line overlay in grayscale.",
+  cantons: "Canton boundaries in grayscale (or optional canton colormap).",
   national_border: "Swiss national border line overlay in grayscale.",
 };
 
@@ -909,7 +966,11 @@ function applyVectorOverlayOpacity(layerId, value) {
     });
     return;
   }
-  if (layerId === "cantons" || layerId === "national_border") {
+  if (layerId === "cantons") {
+    layer.setStyle((feature) => overlayStyle("cantons", feature));
+    return;
+  }
+  if (layerId === "national_border") {
     layer.setStyle({ opacity });
   }
 }
@@ -2146,11 +2207,14 @@ function overlayStyle(kind) {
     };
   }
   if (kind === "cantons") {
+    const opacity = normalizeOpacity(state.layerOpacity.cantons, 0.9);
     return {
-      color: "#4d4d4d",
-      weight: 1.1,
-      opacity: normalizeOpacity(state.layerOpacity.cantons, 0.9),
-      fill: false,
+      color: state.cantonsColorMode ? "#222222" : "#4d4d4d",
+      weight: state.cantonsColorMode ? 0.9 : 1.1,
+      opacity,
+      fill: state.cantonsColorMode,
+      fillColor: state.cantonsColorMode ? "#bdbdbd" : undefined,
+      fillOpacity: state.cantonsColorMode ? Math.min(1, opacity + 0.12) : 0,
       interactive: false,
     };
   }
@@ -2288,7 +2352,7 @@ function createVectorLayer(kind, geojson) {
   return L.geoJSON(geojson, {
     pane: paneName,
     interactive: false,
-    style: () => overlayStyle(kind),
+    style: (feature) => overlayStyle(kind, feature),
   });
 }
 
