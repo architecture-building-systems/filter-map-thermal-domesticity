@@ -49,6 +49,7 @@ def _background_load() -> None:
         store.load()
         _json_response_cache.clear()
         _binary_etag_cache.clear()
+        _prime_json_cache(store.bootstrap_payload, "bootstrap")
     except Exception as exc:  # pragma: no cover
         _load_error = str(exc)
 
@@ -77,6 +78,14 @@ def _etag_hex(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _prime_json_cache(payload: dict, cache_key: str) -> None:
+    blob = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    etag = _etag_hex(blob)
+    gzip_blob = gzip.compress(blob, compresslevel=6)
+    gzip_etag = _etag_hex(gzip_blob)
+    _json_response_cache[cache_key] = (blob, etag, gzip_blob, gzip_etag)
+
+
 def _cached_json_response(
     payload: dict,
     cache_key: str,
@@ -84,12 +93,8 @@ def _cached_json_response(
 ) -> Response:
     cached = _json_response_cache.get(cache_key)
     if cached is None:
-        blob = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-        etag = _etag_hex(blob)
-        gzip_blob = gzip.compress(blob, compresslevel=6)
-        gzip_etag = _etag_hex(gzip_blob)
-        cached = (blob, etag, gzip_blob, gzip_etag)
-        _json_response_cache[cache_key] = cached
+        _prime_json_cache(payload, cache_key)
+        cached = _json_response_cache[cache_key]
     blob, etag, gzip_blob, gzip_etag = cached
 
     accepts_gzip = "gzip" in str(request.headers.get("Accept-Encoding", "")).lower()
@@ -199,7 +204,6 @@ def _parse_zone_number(value) -> int | None:
 
 @app.route("/")
 def index():
-    _ensure_background_load_started()
     return render_template("index.html")
 
 
