@@ -120,11 +120,13 @@ const LAYER_DEFAULT_ORDER = [
   "bioregions",
   "population",
   "elevation",
+  "municipality_bounds",
   "bivariate_municipalities",
 ];
 
 const LAYER_META = {
   bivariate_municipalities: { label: "Municipality Featured Filter", hoverable: true, kind: "bivariate" },
+  municipality_bounds: { label: "Municipality Bounds", hoverable: false, kind: "local_vector" },
   elevation: { label: "Elevation", hoverable: false, kind: "raster" },
   population: { label: "Population", hoverable: false, kind: "raster" },
   bioregions: { label: "Bioregions", hoverable: true, kind: "vector" },
@@ -241,6 +243,7 @@ const DEFAULT_HOVER_FIELDS = {
 };
 
 const LAYER_LEGEND_NOTES = {
+  municipality_bounds: "White municipality polygons with light black boundaries.",
   elevation: "Grayscale heightfield overlay (transparent for no-data). Range shown: 0 to 4000.",
   population: "Aggregated population heat overlay (transparent for no-data). Values clipped to 0 to 200.",
   cantons: "Canton boundary line overlay in grayscale.",
@@ -418,6 +421,9 @@ function defaultLayerVisibility(defaults = {}) {
     bivariate_municipalities: Object.prototype.hasOwnProperty.call(showLayers, "bivariate_municipalities")
       ? !!showLayers.bivariate_municipalities
       : true,
+    municipality_bounds: Object.prototype.hasOwnProperty.call(showLayers, "municipality_bounds")
+      ? !!showLayers.municipality_bounds
+      : false,
     national_border: Object.prototype.hasOwnProperty.call(showLayers, "national_border")
       ? !!showLayers.national_border
       : (Object.prototype.hasOwnProperty.call(showOverlays, "national_border") ? !!showOverlays.national_border : false),
@@ -812,6 +818,9 @@ function layerHasData(layerId) {
   if (layerId === "bivariate_municipalities") {
     return !!(state.bootstrap?.municipalities?.features || []).length;
   }
+  if (layerId === "municipality_bounds") {
+    return !!(state.bootstrap?.municipalities?.features || []).length;
+  }
   const kind = LAYER_META[layerId]?.kind;
   if (kind === "raster") {
     return !!state.bootstrap?.raster_overlays?.[layerId];
@@ -867,6 +876,7 @@ function getDefaultLayerOpacity(layerId) {
   if (layerId === "elevation" || layerId === "population") {
     return normalizeOpacity(state.bootstrap?.raster_overlays?.[layerId]?.default_opacity, 0.6);
   }
+  if (layerId === "municipality_bounds") return 0.38;
   if (layerId === "cantons") return 0.9;
   if (layerId === "national_border") return 1.0;
   return 1.0;
@@ -892,13 +902,20 @@ function applyVectorOverlayOpacity(layerId, value) {
   const layer = getLayerInstance(layerId);
   if (!layer || typeof layer.setStyle !== "function") return;
   const opacity = normalizeOpacity(value, getDefaultLayerOpacity(layerId));
+  if (layerId === "municipality_bounds") {
+    layer.setStyle({
+      opacity,
+      fillOpacity: Math.min(1, opacity + 0.35),
+    });
+    return;
+  }
   if (layerId === "cantons" || layerId === "national_border") {
     layer.setStyle({ opacity });
   }
 }
 
 function applyConfiguredLayerOpacities() {
-  const adjustableLayers = ["elevation", "population", "cantons", "national_border"];
+  const adjustableLayers = ["elevation", "population", "municipality_bounds", "cantons", "national_border"];
   adjustableLayers.forEach((layerId) => {
     if (!state.layerVisibility[layerId]) return;
     const value = normalizeOpacity(state.layerOpacity[layerId], getDefaultLayerOpacity(layerId));
@@ -2107,6 +2124,18 @@ function bioregionStyle(feature, isHover = false) {
 }
 
 function overlayStyle(kind) {
+  if (kind === "municipality_bounds") {
+    const opacity = normalizeOpacity(state.layerOpacity.municipality_bounds, 0.38);
+    return {
+      color: "#111111",
+      weight: 0.7,
+      opacity,
+      fill: true,
+      fillColor: "#ffffff",
+      fillOpacity: Math.min(1, opacity + 0.35),
+      interactive: false,
+    };
+  }
   if (kind === "national_border") {
     return {
       color: "#111111",
@@ -2316,6 +2345,10 @@ function initializeLayerInstances() {
   state.layerOrder.forEach((layerId) => {
     const kind = LAYER_META[layerId]?.kind;
     if (kind === "bivariate") return;
+    if (kind === "local_vector") {
+      state.layerInstances[layerId] = createVectorLayer(layerId, state.bootstrap?.municipalities || null);
+      return;
+    }
     if (kind === "raster") {
       state.layerInstances[layerId] = createRasterLayer(layerId);
       return;

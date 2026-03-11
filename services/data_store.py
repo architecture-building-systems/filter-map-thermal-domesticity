@@ -606,10 +606,12 @@ class DataStore:
                         "bioregions",
                         "population",
                         "elevation",
+                        "municipality_bounds",
                         "bivariate_municipalities",
                     ],
                     "show_layers": {
                         "bivariate_municipalities": True,
+                        "municipality_bounds": False,
                         "national_border": False,
                         "cantons": False,
                         "isos": False,
