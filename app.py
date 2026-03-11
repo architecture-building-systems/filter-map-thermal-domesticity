@@ -267,6 +267,22 @@ def api_raster(layer_id: str):
     )
 
 
+@app.route("/api/municipality/<bfs>/profile")
+def api_municipality_profile(bfs: str):
+    _ensure_background_load_started()
+    if _load_error:
+        return jsonify({"error": _load_error}), 500
+    if not store.ready:
+        return jsonify({"error": "Data store is still loading"}), 503
+
+    payload = store.get_municipality_profile(bfs)
+    if payload is None:
+        return jsonify({"error": f"Unknown municipality BFS: {bfs}"}), 404
+
+    cache_key = f"profile:{payload.get('bfs', str(bfs))}"
+    return _cached_json_response(payload, cache_key, cache_control="public, max-age=300")
+
+
 @app.route("/api/recompute", methods=["POST"])
 def api_recompute():
     _ensure_background_load_started()

@@ -9,6 +9,20 @@ const state = {
   selectedClimateIndicators: new Set(),
   climateTopSharePct: 25,
   climateStageEnabled: false,
+  municipalityModalOpen: false,
+  municipalityModalSelectedBfs: null,
+  municipalityModalActiveTab: "overview",
+  municipalityModalProfileLoading: false,
+  municipalityModalProfileError: "",
+  municipalityModalProfileData: null,
+  municipalityModalProfileCache: {},
+  municipalityModalProfileFetchInFlight: {},
+  municipalityModalReturnFocusEl: null,
+  municipalityModalQueryHandled: false,
+  municipalityModalMap: null,
+  municipalityModalMapReady: false,
+  municipalityModalMapGeometryLayer: null,
+  municipalityModalMapFutureLayer: null,
   municipalityDisplayMode: "bivariate",
   buildingMaterialZoneOptions: [],
   selectedBuildingMaterialZones: new Set(),
@@ -181,6 +195,13 @@ const LAYER_DEFAULT_ORDER = [
   "bivariate_municipalities",
 ];
 
+const MUNICIPALITY_MODAL_TABS = [
+  { id: "overview", label: "Overview" },
+  { id: "climate", label: "Climate & Bioclimatic" },
+  { id: "built", label: "Built Environment" },
+  { id: "context", label: "Context" },
+];
+
 const LAYER_META = {
   bivariate_municipalities: { label: "Municipality Featured Filter", hoverable: true, kind: "bivariate" },
   municipality_bounds: { label: "Municipality Bounds", hoverable: false, kind: "local_vector" },
@@ -327,6 +348,16 @@ const el = {
   loaderDetail: document.getElementById("app-loader-detail"),
   loaderHint: document.getElementById("app-loader-hint"),
   loaderRetry: document.getElementById("app-loader-retry"),
+  municipalityModal: document.getElementById("municipality-modal"),
+  municipalityModalPanel: document.getElementById("municipality-modal-panel"),
+  municipalityModalClose: document.getElementById("municipality-modal-close"),
+  municipalityModalTitle: document.getElementById("municipality-modal-title"),
+  municipalityModalMeta: document.getElementById("municipality-modal-meta"),
+  municipalityModalTabs: document.getElementById("municipality-modal-tabs"),
+  municipalityModalState: document.getElementById("municipality-modal-state"),
+  municipalityModalContent: document.getElementById("municipality-modal-content"),
+  municipalityModalMap: document.getElementById("municipality-modal-map"),
+  municipalityModalGeochips: document.getElementById("municipality-modal-geochips"),
 };
 
 function setStatus(msg) {
@@ -430,6 +461,652 @@ function escapeHtml(value) {
     .replace(/>/g, "&gt;")
     .replace(/\"/g, "&quot;")
     .replace(/'/g, "&#039;");
+}
+
+function normalizeBfsId(value) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return "";
+  if (!/^\d+$/.test(raw)) return "";
+  const n = Number(raw);
+  if (!Number.isSafeInteger(n) || n <= 0) return "";
+  return String(n);
+}
+
+function finiteNumberOrNull(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function formatMetricValue(value, digits = 2) {
+  const n = finiteNumberOrNull(value);
+  if (n === null) return "N/A";
+  return n.toFixed(digits);
+}
+
+function setMunicipalityQueryParam(bfs = null) {
+  const url = new URL(window.location.href);
+  if (bfs) {
+    url.searchParams.set("muni", String(bfs));
+  } else {
+    url.searchParams.delete("muni");
+  }
+  window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+}
+
+function municipalityQueryParam() {
+  const url = new URL(window.location.href);
+  const raw = url.searchParams.get("muni");
+  if (raw === null) {
+    return { present: false, value: "" };
+  }
+  return { present: true, value: normalizeBfsId(raw) };
+}
+
+function municipalityBfsFromFeature(feature) {
+  return normalizeBfsId(feature?.properties?.BFS_NUMMER);
+}
+
+function municipalityProfileTabIsValid(tabId) {
+  return MUNICIPALITY_MODAL_TABS.some((tab) => tab.id === tabId);
+}
+
+function municipalityModalFocusables() {
+  if (!el.municipalityModalPanel) return [];
+  return [...el.municipalityModalPanel.querySelectorAll(
+    "button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])",
+  )].filter((node) => node.offsetParent !== null);
+}
+
+function municipalityProfileMetaLine(profile = null) {
+  if (!profile) return "";
+  const identity = profile.identity || {};
+  const canton = String(identity.canton_name || "").trim();
+  const bfs = String(profile.bfs || "");
+  return canton ? `${canton} | BFS ${bfs}` : `BFS ${bfs}`;
+}
+
+function buildMunicipalityKvMarkup(rows = []) {
+  const html = rows
+    .map((row) => `
+      <div class="municipality-kv-row">
+        <dt>${escapeHtml(row.label)}</dt>
+        <dd>${escapeHtml(row.value)}</dd>
+      </div>
+    `)
+    .join("");
+  return `<dl class="municipality-kv">${html}</dl>`;
+}
+
+function buildMunicipalityOverviewTab(profile) {
+  const overview = profile?.overview || {};
+  const tags = profile?.tags || {};
+  const cards = [];
+
+  cards.push(`
+    <article class="municipality-card">
+      <h3>Municipality Tags</h3>
+      ${buildMunicipalityKvMarkup([
+        { label: "Material Zone", value: tags.building_material_zone || "N/A" },
+        { label: "Material Zone Number", value: tags.building_material_zone_number ?? "N/A" },
+        { label: "Hearth System", value: tags.hearth_system_zone || "N/A" },
+        { label: "Hearth Code", value: tags.hearth_system_zone_number || "N/A" },
+        { label: "Material + Hearth", value: tags.material_hearth_zone || "N/A" },
+      ])}
+    </article>
+  `);
+
+  cards.push(`
+    <article class="municipality-card">
+      <h3>Current Metrics</h3>
+      ${buildMunicipalityKvMarkup([
+        { label: "Temp mean-range", value: formatMetricValue(overview.temperature_mean_range, 2) },
+        { label: "Temp winter mean-range", value: formatMetricValue(overview.temperature_winter_mean_range, 2) },
+        { label: "Older than 1919 (%)", value: formatMetricValue(overview.older_than_1919_pct, 1) },
+        { label: "Population coverage (%)", value: formatMetricValue(overview.population_coverage_pct, 1) },
+        { label: "Stored climate risk (GWL 3.0)", value: formatMetricValue(overview["stored_climate_risk_gwl3.0"], 2) },
+      ])}
+      <p class="municipality-inline-note">Values come from cached municipality attributes.</p>
+    </article>
+  `);
+
+  const benchmarkRows = Array.isArray(profile?.benchmarks) ? profile.benchmarks.slice(0, 7) : [];
+  const benchmarkHtml = benchmarkRows.length
+    ? `
+      <table class="municipality-table">
+        <thead>
+          <tr>
+            <th>Metric</th>
+            <th>Municipality</th>
+            <th>Canton mean</th>
+            <th>Swiss mean</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${benchmarkRows.map((row) => `
+            <tr>
+              <td>${escapeHtml(row.label || row.metric_key || "Metric")}</td>
+              <td>${escapeHtml(formatMetricValue(row.municipality, 2))}</td>
+              <td>${escapeHtml(formatMetricValue(row.canton_mean, 2))}</td>
+              <td>${escapeHtml(formatMetricValue(row.swiss_mean, 2))}</td>
+            </tr>
+          `).join("")}
+        </tbody>
+      </table>
+    `
+    : "<p class=\"municipality-inline-note\">No benchmark metrics available for this municipality.</p>";
+
+  cards.push(`
+    <article class="municipality-card">
+      <h3>Benchmark Snapshot</h3>
+      ${benchmarkHtml}
+    </article>
+  `);
+
+  return `<section class="municipality-tab-grid">${cards.join("")}</section>`;
+}
+
+function buildMunicipalityClimateTab(profile) {
+  const climate = profile?.climate || {};
+  const core = Array.isArray(climate.core_progression) ? climate.core_progression : [];
+  const severity = Array.isArray(climate.severity_top) ? climate.severity_top : [];
+
+  const progressionRows = core.length
+    ? core.map((row) => {
+      const values = row.values || {};
+      return `
+        <div class="municipality-progression-row">
+          <div class="municipality-progression-head">
+            <strong>${escapeHtml(row.label || row.base_key || "Indicator")}</strong>
+            <span>${escapeHtml(row.group || "Climate Indicators")}</span>
+          </div>
+          <div class="municipality-progression-values">
+            GWL 1.5: <strong>${escapeHtml(formatMetricValue(values["gwl1.5"], 2))}</strong> |
+            GWL 2.0: <strong>${escapeHtml(formatMetricValue(values["gwl2.0"], 2))}</strong> |
+            GWL 3.0: <strong>${escapeHtml(formatMetricValue(values["gwl3.0"], 2))}</strong>
+            ${row.gwl3_percentile === null || row.gwl3_percentile === undefined
+              ? ""
+              : `| Percentile: <strong>${escapeHtml(formatMetricValue(row.gwl3_percentile, 1))}</strong>`}
+          </div>
+        </div>
+      `;
+    }).join("")
+    : "<p class=\"municipality-inline-note\">No climate progression indicators available.</p>";
+
+  const severityTable = severity.length
+    ? `
+      <table class="municipality-table">
+        <thead>
+          <tr>
+            <th>Indicator</th>
+            <th>GWL 3.0 value</th>
+            <th>Percentile</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${severity.map((row) => {
+            const values = row.values || {};
+            return `
+              <tr>
+                <td>${escapeHtml(row.label || row.base_key || "Indicator")}</td>
+                <td>${escapeHtml(formatMetricValue(values["gwl3.0"], 2))}</td>
+                <td>${escapeHtml(formatMetricValue(row.gwl3_percentile, 1))}</td>
+              </tr>
+            `;
+          }).join("")}
+        </tbody>
+      </table>
+    `
+    : "<p class=\"municipality-inline-note\">Severity ranking unavailable for current indicators.</p>";
+
+  return `
+    <section class="municipality-tab-grid">
+      <article class="municipality-card">
+        <h3>Scenario Progression (GWL 1.5 → 2.0 → 3.0)</h3>
+        <div class="municipality-progressions">${progressionRows}</div>
+      </article>
+      <article class="municipality-card">
+        <h3>Bioclimatic Severity (Relative)</h3>
+        ${severityTable}
+        <p class="municipality-inline-note">This is a relative ranking within the current municipality domain.</p>
+      </article>
+    </section>
+  `;
+}
+
+function buildMunicipalityBuiltTab(profile) {
+  const built = profile?.built_environment || {};
+  const heating = built.heating || {};
+  const heatingRows = Array.isArray(heating.heating_mix) ? heating.heating_mix : [];
+  const heatingTable = heatingRows.length
+    ? `
+      <table class="municipality-table">
+        <thead>
+          <tr>
+            <th>Heating Type</th>
+            <th>Share (%)</th>
+            <th>Count</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${heatingRows.map((row) => `
+            <tr>
+              <td>${escapeHtml(row.label || row.code || "Heating type")}</td>
+              <td>${escapeHtml(formatMetricValue(row.share_pct, 1))}</td>
+              <td>${escapeHtml(formatMetricValue(row.count, 1))}</td>
+            </tr>
+          `).join("")}
+        </tbody>
+      </table>
+    `
+    : "<p class=\"municipality-inline-note\">No heating composition data available.</p>";
+
+  return `
+    <section class="municipality-tab-grid">
+      <article class="municipality-card">
+        <h3>Heating Composition</h3>
+        ${heatingTable}
+      </article>
+      <article class="municipality-card">
+        <h3>Housing Age Summary</h3>
+        ${buildMunicipalityKvMarkup([
+          { label: "Old stock share (1919 and earlier, %)", value: formatMetricValue(heating.old_1919_share_pct, 1) },
+          { label: "Total building units (proxy)", value: formatMetricValue(heating.total_units, 1) },
+        ])}
+        <p class="municipality-inline-note">Detailed longitudinal housing stock views are marked for a later iteration.</p>
+      </article>
+    </section>
+  `;
+}
+
+function buildMunicipalityContextTab(profile) {
+  const context = profile?.context || {};
+  const identity = profile?.identity || {};
+  const notAvailable = profile?.not_available?.elevation_profile_curve?.message || "Not available in this MVP.";
+  return `
+    <section class="municipality-tab-grid">
+      <article class="municipality-card">
+        <h3>Administrative Context</h3>
+        ${buildMunicipalityKvMarkup([
+          { label: "Canton", value: identity.canton_name || "N/A" },
+          { label: "Language", value: identity.language || "N/A" },
+          { label: "Bioregion", value: context.bioregion || "N/A" },
+        ])}
+      </article>
+      <article class="municipality-card">
+        <h3>Area & Coverage</h3>
+        ${buildMunicipalityKvMarkup([
+          { label: "Total area (sq km)", value: formatMetricValue(context.area_sq_km, 2) },
+          { label: "Inhabited area est. (sq km)", value: formatMetricValue(context.inhabited_area_est_sq_km, 2) },
+          { label: "Population coverage (%)", value: formatMetricValue(context.population_coverage_pct, 1) },
+        ])}
+      </article>
+      <article class="municipality-card">
+        <h3>Coming Next</h3>
+        <p class="municipality-inline-note">${escapeHtml(notAvailable)}</p>
+      </article>
+    </section>
+  `;
+}
+
+function municipalityTabMarkup(profile, tabId) {
+  if (tabId === "overview") return buildMunicipalityOverviewTab(profile);
+  if (tabId === "climate") return buildMunicipalityClimateTab(profile);
+  if (tabId === "built") return buildMunicipalityBuiltTab(profile);
+  return buildMunicipalityContextTab(profile);
+}
+
+function municipalityFeatureByBfs(bfs) {
+  const key = normalizeBfsId(bfs);
+  if (!key) return null;
+  const features = state.bootstrap?.municipalities?.features || [];
+  for (const feature of features) {
+    if (municipalityBfsFromFeature(feature) === key) return feature;
+  }
+  return null;
+}
+
+function ensureMunicipalityModalMap() {
+  if (state.municipalityModalMapReady) return;
+  if (!el.municipalityModalMap || !window.L) return;
+
+  const map = L.map(el.municipalityModalMap, {
+    zoomControl: true,
+    attributionControl: true,
+    scrollWheelZoom: true,
+    zoomAnimation: true,
+    fadeAnimation: true,
+    preferCanvas: false,
+  });
+
+  L.tileLayer("https://{s}.basemaps.cartocdn.com/light_nolabels/{z}/{x}/{y}{r}.png", {
+    attribution: "&copy; OpenStreetMap &copy; CARTO",
+    maxZoom: 19,
+  }).addTo(map);
+
+  const geometryLayer = L.geoJSON(null, {
+    style: {
+      color: "#111111",
+      weight: 2.2,
+      opacity: 1.0,
+      fill: true,
+      fillColor: "#ffffff",
+      fillOpacity: 0.72,
+    },
+  }).addTo(map);
+
+  const futureLayer = L.layerGroup().addTo(map);
+
+  state.municipalityModalMap = map;
+  state.municipalityModalMapGeometryLayer = geometryLayer;
+  state.municipalityModalMapFutureLayer = futureLayer;
+  state.municipalityModalMapReady = true;
+}
+
+function updateMunicipalityModalGeometryMap() {
+  if (!state.municipalityModalOpen) return;
+  ensureMunicipalityModalMap();
+  if (!state.municipalityModalMapReady) return;
+
+  const map = state.municipalityModalMap;
+  const geometryLayer = state.municipalityModalMapGeometryLayer;
+  if (!map || !geometryLayer) return;
+
+  const feature = municipalityFeatureByBfs(state.municipalityModalSelectedBfs);
+  geometryLayer.clearLayers();
+  if (feature) {
+    geometryLayer.addData(feature);
+    const bounds = geometryLayer.getBounds();
+    if (bounds && bounds.isValid()) {
+      map.fitBounds(bounds, { padding: [22, 22], maxZoom: 13 });
+    }
+  }
+
+  window.requestAnimationFrame(() => {
+    map.invalidateSize(true);
+  });
+}
+
+function renderMunicipalityModalGeochips() {
+  if (!el.municipalityModalGeochips) return;
+  const profile = state.municipalityModalProfileData;
+  const bfs = state.municipalityModalSelectedBfs || "";
+  if (!bfs) {
+    el.municipalityModalGeochips.innerHTML = "";
+    return;
+  }
+
+  if (!profile) {
+    el.municipalityModalGeochips.innerHTML = `
+      <div class="municipality-geochip"><span>BFS</span><strong>${escapeHtml(String(bfs))}</strong></div>
+      <div class="municipality-geochip"><span>Status</span><strong>${escapeHtml(state.municipalityModalProfileLoading ? "Loading..." : "Pending")}</strong></div>
+    `;
+    return;
+  }
+
+  const identity = profile.identity || {};
+  const tags = profile.tags || {};
+  const context = profile.context || {};
+  el.municipalityModalGeochips.innerHTML = `
+    <div class="municipality-geochip"><span>BFS</span><strong>${escapeHtml(String(profile.bfs || bfs))}</strong></div>
+    <div class="municipality-geochip"><span>Canton</span><strong>${escapeHtml(String(identity.canton_name || "N/A"))}</strong></div>
+    <div class="municipality-geochip"><span>Bioregion</span><strong>${escapeHtml(String(context.bioregion || "N/A"))}</strong></div>
+    <div class="municipality-geochip"><span>Material</span><strong>${escapeHtml(String(tags.building_material_zone_number ?? "N/A"))}</strong></div>
+    <div class="municipality-geochip"><span>Hearth</span><strong>${escapeHtml(String(tags.hearth_system_zone_number || "N/A"))}</strong></div>
+    <div class="municipality-geochip"><span>Area km²</span><strong>${escapeHtml(formatMetricValue(context.area_sq_km, 2))}</strong></div>
+  `;
+}
+
+function renderMunicipalityModal() {
+  if (!el.municipalityModal) return;
+  const open = !!state.municipalityModalOpen;
+  if (!open) {
+    el.municipalityModal.classList.add("hidden");
+    el.municipalityModal.setAttribute("aria-hidden", "true");
+    if (el.municipalityModalState) {
+      el.municipalityModalState.classList.remove("hidden");
+    }
+    if (el.municipalityModalGeochips) {
+      el.municipalityModalGeochips.innerHTML = "";
+    }
+    return;
+  }
+
+  el.municipalityModal.classList.remove("hidden");
+  el.municipalityModal.setAttribute("aria-hidden", "false");
+  const profile = state.municipalityModalProfileData;
+  const loading = !!state.municipalityModalProfileLoading;
+  const hasError = !!state.municipalityModalProfileError;
+  const activeTab = municipalityProfileTabIsValid(state.municipalityModalActiveTab)
+    ? state.municipalityModalActiveTab
+    : "overview";
+  state.municipalityModalActiveTab = activeTab;
+
+  if (el.municipalityModalTitle) {
+    const title = profile?.identity?.name
+      ? `${profile.identity.name} — Municipality Profile`
+      : `Municipality ${state.municipalityModalSelectedBfs || ""} — Municipality Profile`;
+    el.municipalityModalTitle.textContent = title.trim();
+  }
+  if (el.municipalityModalMeta) {
+    el.municipalityModalMeta.textContent = municipalityProfileMetaLine(profile) || "Loading profile context ...";
+  }
+  if (el.municipalityModalTabs) {
+    el.municipalityModalTabs.innerHTML = MUNICIPALITY_MODAL_TABS
+      .map((tab) => {
+        const active = tab.id === activeTab ? " is-active" : "";
+        return `
+          <button
+            type="button"
+            role="tab"
+            class="municipality-modal-tab${active}"
+            data-muni-tab="${escapeHtml(tab.id)}"
+            aria-selected="${tab.id === activeTab ? "true" : "false"}"
+          >
+            ${escapeHtml(tab.label)}
+          </button>
+        `;
+      })
+      .join("");
+  }
+
+  if (el.municipalityModalState) {
+    if (loading) {
+      el.municipalityModalState.className = "municipality-modal-state";
+      el.municipalityModalState.innerHTML = "Loading municipality profile ...";
+      el.municipalityModalState.classList.remove("hidden");
+    } else if (hasError) {
+      el.municipalityModalState.className = "municipality-modal-state is-error";
+      el.municipalityModalState.innerHTML = `
+        ${escapeHtml(state.municipalityModalProfileError)}
+        <button type="button" class="field-option-action" data-muni-profile-retry style="margin-left:0.5rem;">Retry</button>
+      `;
+      el.municipalityModalState.classList.remove("hidden");
+    } else if (!profile) {
+      el.municipalityModalState.className = "municipality-modal-state";
+      el.municipalityModalState.innerHTML = "No profile data available.";
+      el.municipalityModalState.classList.remove("hidden");
+    } else {
+      el.municipalityModalState.className = "municipality-modal-state hidden";
+      el.municipalityModalState.innerHTML = "";
+    }
+  }
+
+  if (el.municipalityModalContent) {
+    if (!loading && !hasError && profile) {
+      el.municipalityModalContent.innerHTML = municipalityTabMarkup(profile, activeTab);
+      el.municipalityModalContent.classList.remove("hidden");
+    } else {
+      el.municipalityModalContent.innerHTML = "";
+      el.municipalityModalContent.classList.add("hidden");
+    }
+  }
+
+  renderMunicipalityModalGeochips();
+  updateMunicipalityModalGeometryMap();
+}
+
+async function ensureMunicipalityProfileLoaded(bfs, force = false) {
+  const key = normalizeBfsId(bfs);
+  if (!key) {
+    throw new Error("Invalid municipality BFS.");
+  }
+  if (!force && state.municipalityModalProfileCache[key]) {
+    return state.municipalityModalProfileCache[key];
+  }
+  if (state.municipalityModalProfileFetchInFlight[key]) {
+    return state.municipalityModalProfileFetchInFlight[key];
+  }
+
+  const promise = fetchJson(`/api/municipality/${encodeURIComponent(key)}/profile`)
+    .then((data) => {
+      state.municipalityModalProfileCache[key] = data;
+      return data;
+    })
+    .finally(() => {
+      state.municipalityModalProfileFetchInFlight[key] = null;
+    });
+  state.municipalityModalProfileFetchInFlight[key] = promise;
+  return promise;
+}
+
+async function openMunicipalityModal(bfs, preferredTab = "overview") {
+  const key = normalizeBfsId(bfs);
+  if (!key) return;
+
+  state.municipalityModalReturnFocusEl = document.activeElement instanceof HTMLElement
+    ? document.activeElement
+    : null;
+  state.municipalityModalOpen = true;
+  state.municipalityModalSelectedBfs = key;
+  state.municipalityModalActiveTab = municipalityProfileTabIsValid(preferredTab) ? preferredTab : "overview";
+  state.municipalityModalProfileError = "";
+  setMunicipalityQueryParam(key);
+  document.body.classList.add("modal-open");
+
+  const cached = state.municipalityModalProfileCache[key];
+  if (cached) {
+    state.municipalityModalProfileLoading = false;
+    state.municipalityModalProfileData = cached;
+    renderMunicipalityModal();
+  } else {
+    state.municipalityModalProfileLoading = true;
+    state.municipalityModalProfileData = null;
+    renderMunicipalityModal();
+    try {
+      const profile = await ensureMunicipalityProfileLoaded(key);
+      if (!state.municipalityModalOpen || state.municipalityModalSelectedBfs !== key) return;
+      state.municipalityModalProfileData = profile;
+      state.municipalityModalProfileError = "";
+    } catch (err) {
+      if (!state.municipalityModalOpen || state.municipalityModalSelectedBfs !== key) return;
+      state.municipalityModalProfileData = null;
+      state.municipalityModalProfileError = String(err?.message || "Failed to load municipality profile.");
+    } finally {
+      if (state.municipalityModalOpen && state.municipalityModalSelectedBfs === key) {
+        state.municipalityModalProfileLoading = false;
+        renderMunicipalityModal();
+      }
+    }
+  }
+
+  renderMunicipalityModal();
+  window.requestAnimationFrame(() => {
+    el.municipalityModalClose?.focus();
+    updateMunicipalityModalGeometryMap();
+  });
+}
+
+function closeMunicipalityModal() {
+  if (!state.municipalityModalOpen) return;
+  state.municipalityModalOpen = false;
+  state.municipalityModalProfileLoading = false;
+  state.municipalityModalProfileError = "";
+  state.municipalityModalProfileData = null;
+  state.municipalityModalSelectedBfs = null;
+  renderMunicipalityModal();
+  setMunicipalityQueryParam(null);
+  document.body.classList.remove("modal-open");
+  if (state.municipalityModalReturnFocusEl && typeof state.municipalityModalReturnFocusEl.focus === "function") {
+    state.municipalityModalReturnFocusEl.focus();
+  }
+  state.municipalityModalReturnFocusEl = null;
+}
+
+function openMunicipalityModalFromFeature(feature) {
+  const bfs = municipalityBfsFromFeature(feature);
+  if (!bfs) return;
+  openMunicipalityModal(bfs);
+}
+
+function maybeOpenMunicipalityModalFromQuery() {
+  if (state.municipalityModalQueryHandled) return;
+  state.municipalityModalQueryHandled = true;
+  const query = municipalityQueryParam();
+  if (!query.present) return;
+  if (!query.value) {
+    setMunicipalityQueryParam(null);
+    return;
+  }
+  openMunicipalityModal(query.value);
+}
+
+function wireMunicipalityModalEvents() {
+  if (!el.municipalityModal) return;
+
+  el.municipalityModal.addEventListener("click", (event) => {
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+    if (target.closest("[data-muni-modal-close]")) {
+      closeMunicipalityModal();
+      return;
+    }
+    const tabNode = target.closest("[data-muni-tab]");
+    if (tabNode) {
+      const tabId = String(tabNode.getAttribute("data-muni-tab") || "");
+      if (municipalityProfileTabIsValid(tabId)) {
+        state.municipalityModalActiveTab = tabId;
+        renderMunicipalityModal();
+      }
+      return;
+    }
+    const retryNode = target.closest("[data-muni-profile-retry]");
+    if (retryNode) {
+      const bfs = state.municipalityModalSelectedBfs;
+      if (bfs) {
+        delete state.municipalityModalProfileCache[bfs];
+        openMunicipalityModal(bfs, state.municipalityModalActiveTab);
+      }
+    }
+  });
+
+  el.municipalityModalClose?.addEventListener("click", () => {
+    closeMunicipalityModal();
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (!state.municipalityModalOpen) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeMunicipalityModal();
+      return;
+    }
+    if (event.key === "Tab") {
+      const focusable = municipalityModalFocusables();
+      if (!focusable.length) {
+        event.preventDefault();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+  });
 }
 
 function hashString(text) {
@@ -2279,7 +2956,7 @@ function overlayStyle(kind, feature = null) {
       fill: true,
       fillColor: "#ffffff",
       fillOpacity: Math.min(1, opacity + 0.35),
-      interactive: false,
+      interactive: true,
     };
   }
   if (kind === "national_border") {
@@ -2420,6 +3097,20 @@ function createVectorLayer(kind, geojson) {
         layer.on("mouseout", () => {
           layer.setStyle(bioregionStyle(feature, false));
           applyBioregionPattern(layer, regionKey, false);
+        });
+      },
+    });
+  }
+
+  if (kind === "municipality_bounds") {
+    return L.geoJSON(geojson, {
+      pane: paneName,
+      interactive: true,
+      bubblingMouseEvents: false,
+      style: (feature) => overlayStyle(kind, feature),
+      onEachFeature: (feature, layer) => {
+        layer.on("click", () => {
+          openMunicipalityModalFromFeature(feature);
         });
       },
     });
@@ -2925,6 +3616,9 @@ function renderMunicipalities(fitBounds = false) {
     style: muniStyle,
     onEachFeature: (feature, layer) => {
       bindTooltipForLayer("bivariate_municipalities", feature, layer, municipalityDataObject(feature));
+      layer.on("click", () => {
+        openMunicipalityModalFromFeature(feature);
+      });
     },
   });
   state.layerInstances.bivariate_municipalities = state.muniLayer;
@@ -3315,9 +4009,11 @@ async function boot() {
     renderLayerOrderControls();
     applyLayerOrderAndVisibility();
     wireAutoUpdateEvents();
+    wireMunicipalityModalEvents();
 
     setLoaderStage("Computing municipality featured classes", "Calculating initial map values ...");
     await recompute(true, true);
+    maybeOpenMunicipalityModalFromQuery();
 
     setLoaderStage("Ready", "Map loaded.");
     setLoaderHint("");

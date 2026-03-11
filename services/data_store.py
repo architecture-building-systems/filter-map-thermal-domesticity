@@ -6,6 +6,7 @@ import gzip
 from datetime import date, datetime
 import json
 import os
+import re
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,7 +21,7 @@ from rasterio.features import rasterize
 from rasterio.io import MemoryFile
 from rasterio.warp import transform_bounds
 
-from .climate_metrics import default_indicator_keys, get_climate_indicator_options
+from .climate_metrics import CLIMATE_INDICATOR_BY_KEY, default_indicator_keys, get_climate_indicator_options
 from .compute import label_heating_options
 
 
@@ -80,6 +81,18 @@ class DataStore:
         26: "Jura",
     }
 
+    PROFILE_CONTEXT_FIELDS = (
+        "temperature_mean-range",
+        "temperature_winter_mean-range",
+        "temperature_mean-max",
+        "temperature_mean-min",
+        "older_than_1919_pct",
+        "older_than_1919_pct_original_system",
+        "population_coverage_pct",
+        "climate_risk_gwl3.0",
+        "climate_risk_range",
+    )
+
     def __init__(self, base_dir: Path):
         self.base_dir = base_dir
         self.background_dir = base_dir / "background_data"
@@ -110,6 +123,18 @@ class DataStore:
         self.load_warnings: list[str] = []
         self.raster_overlay_meta: dict[str, dict] = {}
         self.raster_overlay_png: dict[str, bytes] = {}
+        self.profile_cache: dict[str, dict] = {}
+        self.profile_base_by_bfs: dict[str, dict] = {}
+        self.profile_area_sq_km_by_bfs: dict[str, float] = {}
+        self.profile_bioregion_by_bfs: dict[str, str] = {}
+        self.profile_heating_summary_by_bfs: dict[str, dict] = {}
+        self.profile_metric_frame: pd.DataFrame = pd.DataFrame()
+        self.profile_percentile_frame: pd.DataFrame = pd.DataFrame()
+        self.profile_benchmark_keys: list[str] = []
+        self.profile_canton_benchmarks: dict[str, dict[str, float | None]] = {}
+        self.profile_swiss_benchmarks: dict[str, float | None] = {}
+        self.profile_indicator_catalog: list[dict[str, object]] = []
+        self.profile_core_indicator_keys: list[str] = []
 
         self._label_raster: np.ndarray | None = None
         self._pop_mask: np.ndarray | None = None
@@ -148,6 +173,7 @@ class DataStore:
         self._prepare_label_raster(muni_gdf)
         self._precompute_temperature_aggregates()
         self._load_heating_records()
+        self._build_profile_caches(muni_gdf)
         self._build_raster_overlays()
         self.overlay_specs = self._build_overlay_specs()
         self.overlay_payloads = {}
@@ -244,6 +270,432 @@ class DataStore:
 
         out.sort(key=lambda value: value.lower())
         return [{"zone_label": str(label)} for label in out]
+
+    def _profile_numeric_columns(self, gdf: gpd.GeoDataFrame) -> list[str]:
+        cols: list[str] = []
+        for field in self.PROFILE_CONTEXT_FIELDS:
+            if field in gdf.columns:
+                cols.append(field)
+        for col in gdf.columns:
+            if re.match(r".+_gwl(1\.5|2\.0|3\.0)$", str(col)):
+                cols.append(str(col))
+        # Preserve order while deduplicating.
+        return list(dict.fromkeys(cols))
+
+    def _build_profile_indicator_catalog(self, columns: Iterable[str]) -> list[dict[str, object]]:
+        pattern = re.compile(r"^(?P<base>.+)_gwl(?P<level>1\.5|2\.0|3\.0)$")
+        by_base: dict[str, dict[str, str]] = {}
+        for raw_col in columns:
+            col = str(raw_col)
+            match = pattern.match(col)
+            if not match:
+                continue
+            base = str(match.group("base"))
+            level = str(match.group("level"))
+            by_base.setdefault(base, {})[f"gwl{level}"] = col
+
+        ordered_bases: list[str] = []
+        seen: set[str] = set()
+        for option in self.climate_indicator_options:
+            key = str(option.get("key", ""))
+            match = pattern.match(key)
+            if not match:
+                continue
+            base = str(match.group("base"))
+            if base in by_base and base not in seen:
+                seen.add(base)
+                ordered_bases.append(base)
+
+        for base in sorted(by_base.keys()):
+            if base in seen:
+                continue
+            seen.add(base)
+            ordered_bases.append(base)
+
+        out: list[dict[str, object]] = []
+        for base in ordered_bases:
+            gwl_columns = by_base.get(base, {})
+            key_gwl3 = gwl_columns.get("gwl3.0", f"{base}_gwl3.0")
+            meta = CLIMATE_INDICATOR_BY_KEY.get(key_gwl3)
+            label = str(meta["label"]) if meta else _format_metric_label(base)
+            group = str(meta["group"]) if meta else "Climate Indicators"
+            out.append(
+                {
+                    "base_key": base,
+                    "label": label,
+                    "group": group,
+                    "gwl_columns": gwl_columns,
+                    "gwl3_key": key_gwl3,
+                }
+            )
+        return out
+
+    def _build_profile_bioregion_map(self, muni_gdf: gpd.GeoDataFrame) -> dict[str, str]:
+        out: dict[str, str] = {}
+        path = self.background_dir / "04_swiss_bioregions.geojson"
+        if not path.exists():
+            return out
+
+        try:
+            bioregions = gpd.read_file(path)
+            if bioregions.crs is None:
+                bioregions = bioregions.set_crs(epsg=2056)
+            else:
+                bioregions = bioregions.to_crs(epsg=2056)
+        except Exception as exc:
+            self.load_warnings.append(f"Bioregion map unavailable for profiles: {exc}")
+            return out
+
+        region_shapes: list[tuple[str, object]] = []
+        for _, row in bioregions.iterrows():
+            label = str(row.get("DEBioBedeu") or row.get("RegionName") or "").strip()
+            geom = row.geometry
+            if not label or geom is None or geom.is_empty:
+                continue
+            region_shapes.append((label, geom))
+
+        for _, row in muni_gdf.iterrows():
+            bfs = str(int(row["BFS_NUMMER"]))
+            geom = row.geometry
+            if geom is None or geom.is_empty:
+                continue
+            point = geom.representative_point()
+            matched = ""
+            for label, region_geom in region_shapes:
+                if region_geom.contains(point) or region_geom.intersects(point):
+                    matched = label
+                    break
+            if matched:
+                out[bfs] = matched
+        return out
+
+    def _build_profile_heating_summaries(self) -> dict[str, dict]:
+        label_map = {item["code"]: item["label"] for item in label_heating_options(self.heating_codes)}
+        summaries: dict[str, dict] = {}
+
+        for bfs, rec in self.heating_records.items():
+            total_units = 0.0
+            heat_totals: dict[str, float] = {}
+            for age_code in self.AGE_KEYS_SORTED:
+                by_heat = rec.age_heating.get(age_code, {})
+                for heat_code, value in by_heat.items():
+                    v = _safe_float(value, 0.0)
+                    if not np.isfinite(v) or v <= 0:
+                        continue
+                    total_units += v
+                    heat_totals[heat_code] = heat_totals.get(heat_code, 0.0) + float(v)
+
+            age_total_units = float(sum(_safe_float(v, 0.0) for v in rec.age_totals.values()))
+            old_units = float(_safe_float(rec.age_totals.get("8011"), 0.0))
+            old_share = (old_units / age_total_units) * 100.0 if age_total_units > 0 else None
+
+            heating_rows = []
+            for heat_code, value in sorted(heat_totals.items(), key=lambda item: (-item[1], item[0])):
+                share = (float(value) / total_units) * 100.0 if total_units > 0 else None
+                heating_rows.append(
+                    {
+                        "code": str(heat_code),
+                        "label": str(label_map.get(str(heat_code), f"Heating {heat_code}")),
+                        "count": float(value),
+                        "share_pct": float(share) if share is not None and np.isfinite(share) else None,
+                    }
+                )
+
+            summaries[str(bfs)] = {
+                "total_units": float(total_units),
+                "old_1919_share_pct": float(old_share) if old_share is not None and np.isfinite(old_share) else None,
+                "heating_mix": heating_rows,
+            }
+        return summaries
+
+    def _build_profile_caches(self, muni_gdf: gpd.GeoDataFrame) -> None:
+        self.profile_cache = {}
+        self.profile_base_by_bfs = {}
+        self.profile_area_sq_km_by_bfs = {}
+        self.profile_bioregion_by_bfs = {}
+        self.profile_heating_summary_by_bfs = {}
+        self.profile_metric_frame = pd.DataFrame()
+        self.profile_percentile_frame = pd.DataFrame()
+        self.profile_benchmark_keys = []
+        self.profile_canton_benchmarks = {}
+        self.profile_swiss_benchmarks = {}
+        self.profile_indicator_catalog = []
+        self.profile_core_indicator_keys = []
+
+        gdf = muni_gdf.copy()
+        if gdf.empty:
+            return
+
+        gdf["BFS_NUMMER"] = gdf["BFS_NUMMER"].astype(int)
+        if "KANTONSNUM" in gdf.columns:
+            gdf["KANTONSNUM"] = pd.to_numeric(gdf["KANTONSNUM"], errors="coerce")
+        else:
+            gdf["KANTONSNUM"] = np.nan
+
+        # Base profile data and area cache.
+        for _, row in gdf.iterrows():
+            bfs = str(int(row["BFS_NUMMER"]))
+            rec = {
+                "bfs": bfs,
+                "name": str(row.get("NAME") or bfs),
+                "language": _normalize_label(row.get("LANGUAGE")),
+            }
+            canton_num = _safe_int(row.get("KANTONSNUM"), None)
+            if canton_num is not None:
+                rec["canton_num"] = int(canton_num)
+                rec["canton_name"] = self.CANTON_NAMES.get(int(canton_num), f"Canton {canton_num}")
+
+            for key in ("building_material_zone", "building_material_zone_number", "hearth_system_zone", "hearth_system_zone_number", "material+hearth_zone"):
+                value = row.get(key)
+                if key.endswith("_number"):
+                    parsed = _safe_int(value, None)
+                    if parsed is not None:
+                        rec[key] = parsed
+                else:
+                    label = _normalize_label(value)
+                    if label:
+                        rec[key] = label
+
+            for key in self.PROFILE_CONTEXT_FIELDS:
+                if key not in gdf.columns:
+                    continue
+                value = _safe_float(row.get(key), float("nan"))
+                if np.isfinite(value):
+                    rec[key] = float(value)
+
+            geom = row.geometry
+            if geom is not None and not geom.is_empty:
+                area_sq_km = float(max(0.0, geom.area) / 1_000_000.0)
+                self.profile_area_sq_km_by_bfs[bfs] = area_sq_km
+                rec["area_sq_km"] = area_sq_km
+
+            self.profile_base_by_bfs[bfs] = rec
+
+        numeric_cols = self._profile_numeric_columns(gdf)
+        frame = gdf[["BFS_NUMMER", "KANTONSNUM", *numeric_cols]].copy()
+        frame["BFS_NUMMER"] = frame["BFS_NUMMER"].astype(int).astype(str)
+        for col in ["KANTONSNUM", *numeric_cols]:
+            frame[col] = pd.to_numeric(frame[col], errors="coerce")
+        frame = frame.set_index("BFS_NUMMER").sort_index()
+        self.profile_metric_frame = frame
+
+        self.profile_indicator_catalog = self._build_profile_indicator_catalog(frame.columns)
+        catalog_gwl3_keys = {
+            str(item.get("gwl3_key"))
+            for item in self.profile_indicator_catalog
+            if str(item.get("gwl3_key"))
+        }
+        self.profile_core_indicator_keys = [
+            key for key in self.default_climate_indicator_keys if key in catalog_gwl3_keys
+        ]
+
+        gwl3_cols = [
+            str(item.get("gwl_columns", {}).get("gwl3.0"))
+            for item in self.profile_indicator_catalog
+            if str(item.get("gwl_columns", {}).get("gwl3.0"))
+            and str(item.get("gwl_columns", {}).get("gwl3.0")) in frame.columns
+        ]
+        if gwl3_cols:
+            self.profile_percentile_frame = (
+                frame[gwl3_cols]
+                .rank(axis=0, method="average", pct=True, na_option="keep")
+                .mul(100.0)
+            )
+
+        benchmark_keys: list[str] = []
+        for key in (
+            "temperature_mean-range",
+            "temperature_winter_mean-range",
+            "older_than_1919_pct",
+            "population_coverage_pct",
+            "climate_risk_gwl3.0",
+        ):
+            if key in frame.columns and key not in benchmark_keys:
+                benchmark_keys.append(key)
+        for key in self.default_climate_indicator_keys:
+            if key in frame.columns and key not in benchmark_keys:
+                benchmark_keys.append(key)
+        self.profile_benchmark_keys = benchmark_keys
+
+        for key in benchmark_keys:
+            series = pd.to_numeric(frame[key], errors="coerce")
+            canton_means: dict[str, float | None] = {}
+            grouped = pd.concat([frame["KANTONSNUM"], series], axis=1).dropna(subset=["KANTONSNUM"])
+            for canton_num, group in grouped.groupby("KANTONSNUM"):
+                values = pd.to_numeric(group[key], errors="coerce")
+                mean = float(values.mean(skipna=True))
+                if np.isfinite(mean):
+                    canton_means[str(int(canton_num))] = mean
+            self.profile_canton_benchmarks[key] = canton_means
+            swiss_mean = float(series.mean(skipna=True))
+            self.profile_swiss_benchmarks[key] = swiss_mean if np.isfinite(swiss_mean) else None
+
+        self.profile_bioregion_by_bfs = self._build_profile_bioregion_map(gdf)
+        self.profile_heating_summary_by_bfs = self._build_profile_heating_summaries()
+
+    def get_municipality_profile(self, bfs: str | int) -> dict | None:
+        parsed_bfs = _safe_int(bfs, None)
+        if parsed_bfs is None:
+            return None
+        key = str(int(parsed_bfs))
+        if key in self.profile_cache:
+            return self.profile_cache[key]
+
+        base = self.profile_base_by_bfs.get(key)
+        if base is None:
+            return None
+
+        row = self.profile_metric_frame.loc[key] if key in self.profile_metric_frame.index else pd.Series(dtype=np.float64)
+        canton_key = str(int(base.get("canton_num", 0))) if base.get("canton_num") is not None else ""
+        area_sq_km = self.profile_area_sq_km_by_bfs.get(key)
+        coverage_pct = _safe_float(row.get("population_coverage_pct"), float("nan"))
+        inhabited_area = None
+        if area_sq_km is not None and np.isfinite(coverage_pct):
+            inhabited_area = float(area_sq_km * (coverage_pct / 100.0))
+
+        progression: list[dict[str, object]] = []
+        for item in self.profile_indicator_catalog:
+            columns = item.get("gwl_columns", {})
+            if not isinstance(columns, dict):
+                continue
+            values: dict[str, float | None] = {}
+            has_value = False
+            for scenario in ("gwl1.5", "gwl2.0", "gwl3.0"):
+                col = str(columns.get(scenario, ""))
+                if not col or col not in self.profile_metric_frame.columns:
+                    values[scenario] = None
+                    continue
+                value = _safe_float(row.get(col), float("nan"))
+                if np.isfinite(value):
+                    has_value = True
+                    values[scenario] = float(value)
+                else:
+                    values[scenario] = None
+            if not has_value:
+                continue
+
+            gwl3_col = str(columns.get("gwl3.0", ""))
+            percentile = None
+            if (
+                gwl3_col
+                and not self.profile_percentile_frame.empty
+                and gwl3_col in self.profile_percentile_frame.columns
+                and key in self.profile_percentile_frame.index
+            ):
+                percentile_raw = _safe_float(self.profile_percentile_frame.at[key, gwl3_col], float("nan"))
+                if np.isfinite(percentile_raw):
+                    percentile = float(percentile_raw)
+
+            progression.append(
+                {
+                    "base_key": str(item.get("base_key") or ""),
+                    "label": str(item.get("label") or _format_metric_label(str(item.get("base_key") or ""))),
+                    "group": str(item.get("group") or "Climate Indicators"),
+                    "values": values,
+                    "gwl3_percentile": percentile,
+                }
+            )
+
+        progression_sorted = sorted(progression, key=lambda rec: (str(rec.get("group")), str(rec.get("label"))))
+        core_progression = [
+            rec
+            for rec in progression_sorted
+            if f"{rec.get('base_key', '')}_gwl3.0" in set(self.profile_core_indicator_keys)
+        ]
+        if not core_progression:
+            core_progression = progression_sorted[:8]
+
+        severity_top = sorted(
+            [rec for rec in progression_sorted if rec.get("gwl3_percentile") is not None],
+            key=lambda rec: (-float(rec.get("gwl3_percentile") or 0.0), str(rec.get("label") or "")),
+        )[:10]
+
+        benchmark_rows: list[dict[str, object]] = []
+        for metric_key in self.profile_benchmark_keys:
+            municipality_val = _safe_float(row.get(metric_key), float("nan"))
+            canton_val = self.profile_canton_benchmarks.get(metric_key, {}).get(canton_key)
+            swiss_val = self.profile_swiss_benchmarks.get(metric_key)
+            benchmark_rows.append(
+                {
+                    "metric_key": metric_key,
+                    "label": _format_metric_label(metric_key),
+                    "municipality": float(municipality_val) if np.isfinite(municipality_val) else None,
+                    "canton_mean": float(canton_val) if canton_val is not None and np.isfinite(canton_val) else None,
+                    "swiss_mean": float(swiss_val) if swiss_val is not None and np.isfinite(swiss_val) else None,
+                }
+            )
+
+        heating = self.profile_heating_summary_by_bfs.get(
+            key,
+            {"total_units": 0.0, "old_1919_share_pct": None, "heating_mix": []},
+        )
+
+        payload = {
+            "bfs": key,
+            "identity": {
+                "name": str(base.get("name") or key),
+                "canton_name": str(base.get("canton_name") or ""),
+                "canton_num": base.get("canton_num"),
+                "language": str(base.get("language") or ""),
+            },
+            "tags": {
+                "building_material_zone": base.get("building_material_zone"),
+                "building_material_zone_number": base.get("building_material_zone_number"),
+                "hearth_system_zone": base.get("hearth_system_zone"),
+                "hearth_system_zone_number": base.get("hearth_system_zone_number"),
+                "material_hearth_zone": base.get("material+hearth_zone"),
+            },
+            "overview": {
+                "temperature_mean_range": _safe_profile_value(row.get("temperature_mean-range")),
+                "temperature_winter_mean_range": _safe_profile_value(row.get("temperature_winter_mean-range")),
+                "older_than_1919_pct": _safe_profile_value(row.get("older_than_1919_pct")),
+                "older_than_1919_pct_original_system": _safe_profile_value(row.get("older_than_1919_pct_original_system")),
+                "population_coverage_pct": _safe_profile_value(row.get("population_coverage_pct")),
+                "stored_climate_risk_gwl3.0": _safe_profile_value(row.get("climate_risk_gwl3.0")),
+                "climate_risk_range": _safe_profile_value(row.get("climate_risk_range")),
+            },
+            "benchmarks": benchmark_rows,
+            "climate": {
+                "core_progression": core_progression,
+                "progression": progression_sorted,
+                "severity_top": severity_top,
+                "not_available": {
+                    "true_historical_timeline": {
+                        "status": "not_available",
+                        "message": "True historical per-year climate timeline is not available in this MVP.",
+                    }
+                },
+            },
+            "built_environment": {
+                "heating": heating,
+                "not_available": {
+                    "detailed_housing_stock_timeseries": {
+                        "status": "not_available",
+                        "message": "Detailed historical building stock timeline is not available in this MVP.",
+                    }
+                },
+            },
+            "context": {
+                "bioregion": self.profile_bioregion_by_bfs.get(key),
+                "area_sq_km": float(area_sq_km) if area_sq_km is not None and np.isfinite(area_sq_km) else None,
+                "inhabited_area_est_sq_km": (
+                    float(inhabited_area) if inhabited_area is not None and np.isfinite(inhabited_area) else None
+                ),
+                "population_coverage_pct": _safe_profile_value(row.get("population_coverage_pct")),
+            },
+            "analysis_note": (
+                "Profile uses cached municipality attributes and benchmark summaries. "
+                "Stage-specific recompute outputs are not persisted in this endpoint."
+            ),
+            "not_available": {
+                "elevation_profile_curve": {
+                    "status": "not_available",
+                    "message": "Detailed intra-municipality elevation profile is not available in this MVP.",
+                }
+            },
+        }
+        self.profile_cache[key] = payload
+        return payload
 
     def _prepare_label_raster(self, muni_gdf: gpd.GeoDataFrame) -> None:
         pop_path = self.background_dir / "06_population_mask.tif"
@@ -824,4 +1276,27 @@ def _safe_int(v, default: int | None = 0) -> int | None:
 def _normalize_label(v) -> str:
     if v is None:
         return ""
+    try:
+        if bool(pd.isna(v)):
+            return ""
+    except Exception:
+        pass
     return str(v).strip()
+
+
+def _safe_profile_value(value) -> float | None:
+    numeric = _safe_float(value, float("nan"))
+    if np.isfinite(numeric):
+        return float(numeric)
+    return None
+
+
+def _format_metric_label(key: str) -> str:
+    if key in CLIMATE_INDICATOR_BY_KEY:
+        return str(CLIMATE_INDICATOR_BY_KEY[key]["label"])
+    cleaned = str(key or "")
+    cleaned = re.sub(r"_gwl(1\.5|2\.0|3\.0)$", "", cleaned)
+    cleaned = cleaned.replace("_", " ").replace("-", " ").strip()
+    if not cleaned:
+        return "Metric"
+    return cleaned[0].upper() + cleaned[1:]

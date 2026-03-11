@@ -10,7 +10,7 @@
   <link href="https://fonts.googleapis.com/css2?family=Comfortaa:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-  <link rel="stylesheet" href="{{ url_for('static', filename='app.css', v='20260311e') }}" />
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css', v='20260311g') }}" />
 </head>
 <body>
   <div id="app-loader" class="is-visible" role="status" aria-live="polite" aria-label="Application loading">
@@ -108,7 +108,41 @@
     </section>
   </aside>
 
+  <section id="municipality-modal" class="municipality-modal hidden" aria-hidden="true">
+    <div class="municipality-modal-backdrop" data-muni-modal-close></div>
+    <div
+      id="municipality-modal-panel"
+      class="municipality-modal-panel"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="municipality-modal-title"
+      aria-describedby="municipality-modal-meta"
+      tabindex="-1"
+    >
+      <header class="municipality-modal-header">
+        <div class="municipality-modal-heading">
+          <h2 id="municipality-modal-title">Municipality Profile</h2>
+          <p id="municipality-modal-meta">Loading municipality profile ...</p>
+        </div>
+        <button id="municipality-modal-close" class="municipality-modal-close" type="button" aria-label="Close municipality profile">
+          ×
+        </button>
+      </header>
+      <div id="municipality-modal-body" class="municipality-modal-body">
+        <aside class="municipality-modal-left" aria-label="Municipality geometry">
+          <div id="municipality-modal-map" class="municipality-modal-map" aria-label="Municipality map geometry"></div>
+          <div id="municipality-modal-geochips" class="municipality-modal-geochips"></div>
+        </aside>
+        <section class="municipality-modal-right" aria-label="Municipality analytics">
+          <nav id="municipality-modal-tabs" class="municipality-modal-tabs" role="tablist" aria-label="Municipality profile sections"></nav>
+          <div id="municipality-modal-state" class="municipality-modal-state">Loading municipality profile ...</div>
+          <div id="municipality-modal-content" class="municipality-modal-content"></div>
+        </section>
+      </div>
+    </div>
+  </section>
+
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <script src="{{ url_for('static', filename='app.js', v='20260311e') }}"></script>
+  <script src="{{ url_for('static', filename='app.js', v='20260311g') }}"></script>
 </body>
 </html>
