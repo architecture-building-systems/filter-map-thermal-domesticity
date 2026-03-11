@@ -613,6 +613,81 @@ function resolveHearthZoneColor(labelValue) {
   return HEARTH_ZONE_COLORS[fallbackIdx] || FALLBACK_FILL;
 }
 
+function normalizeCantonNumber(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return null;
+  return Math.trunc(numeric);
+}
+
+function cantonNumberFromFeature(feature) {
+  return normalizeCantonNumber(feature?.properties?.KANTONSNUM);
+}
+
+function cantonNameFromFeature(feature) {
+  const fromFeature = String(feature?.properties?.NAME || "").trim();
+  if (fromFeature) return fromFeature;
+  const cantonNumber = cantonNumberFromFeature(feature);
+  if (cantonNumber !== null && CANTON_NAME_BY_NUM[cantonNumber]) {
+    return CANTON_NAME_BY_NUM[cantonNumber];
+  }
+  return cantonNumber === null ? "Unknown canton" : `Canton ${cantonNumber}`;
+}
+
+function cantonColorFromNumber(cantonNumber) {
+  if (cantonNumber !== null && CANTON_COLOR_BY_NUM[cantonNumber]) {
+    return CANTON_COLOR_BY_NUM[cantonNumber];
+  }
+  return "#9a9a9a";
+}
+
+function cantonStyle(feature = null) {
+  const opacity = normalizeOpacity(state.layerOpacity.cantons, 0.9);
+  if (!state.cantonsColorMode) {
+    return {
+      color: "#4d4d4d",
+      weight: 1.1,
+      opacity,
+      fill: false,
+      fillOpacity: 0,
+      interactive: false,
+    };
+  }
+  const cantonNumber = cantonNumberFromFeature(feature);
+  return {
+    color: "#222222",
+    weight: 0.9,
+    opacity,
+    fill: true,
+    fillColor: cantonColorFromNumber(cantonNumber),
+    fillOpacity: Math.min(1, opacity + 0.12),
+    interactive: false,
+  };
+}
+
+function refreshCantonStyles() {
+  const cantonLayer = getLayerInstance("cantons");
+  if (!cantonLayer || typeof cantonLayer.setStyle !== "function") return;
+  cantonLayer.setStyle((feature) => cantonStyle(feature));
+}
+
+function cantonLegendEntries() {
+  const byNumber = new Map();
+  const features = overlayGeojson("cantons")?.features || [];
+  features.forEach((feature) => {
+    const cantonNumber = cantonNumberFromFeature(feature);
+    if (cantonNumber === null || byNumber.has(cantonNumber)) return;
+    byNumber.set(cantonNumber, cantonNameFromFeature(feature));
+  });
+
+  return [...byNumber.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([cantonNumber, name]) => ({
+      cantonNumber,
+      name: String(name || CANTON_NAME_BY_NUM[cantonNumber] || `Canton ${cantonNumber}`),
+      color: cantonColorFromNumber(cantonNumber),
+    }));
+}
+
 function bioregionKeyFromProps(props) {
   const primary = String(props?.DEBioBedeu ?? "").trim();
   if (primary) return primary;
@@ -967,7 +1042,7 @@ function applyVectorOverlayOpacity(layerId, value) {
     return;
   }
   if (layerId === "cantons") {
-    layer.setStyle((feature) => overlayStyle("cantons", feature));
+    refreshCantonStyles();
     return;
   }
   if (layerId === "national_border") {
@@ -2083,6 +2158,8 @@ function renderLayerStacks() {
     if (!legendMount) return;
     if (layerId === "bivariate_municipalities") {
       renderMunicipalityLegend(legendMount);
+    } else if (layerId === "cantons") {
+      renderCantonsLegend(legendMount);
     } else if (layerId === "isos") {
       renderIsosLegend(legendMount);
     } else if (layerId === "bioregions") {
@@ -2090,6 +2167,14 @@ function renderLayerStacks() {
     } else {
       legendMount.innerHTML = compactLegendMarkup(layerId);
     }
+  });
+
+  [...el.hoverPillRow.querySelectorAll("input[data-canton-color-mode]")].forEach((node) => {
+    node.addEventListener("change", () => {
+      state.cantonsColorMode = !!node.checked;
+      refreshCantonStyles();
+      renderLayerStacks();
+    });
   });
 
   renderExceptionalPlaces(
@@ -2184,7 +2269,7 @@ function bioregionStyle(feature, isHover = false) {
   };
 }
 
-function overlayStyle(kind) {
+function overlayStyle(kind, feature = null) {
   if (kind === "municipality_bounds") {
     const opacity = normalizeOpacity(state.layerOpacity.municipality_bounds, 0.38);
     return {
@@ -2207,16 +2292,7 @@ function overlayStyle(kind) {
     };
   }
   if (kind === "cantons") {
-    const opacity = normalizeOpacity(state.layerOpacity.cantons, 0.9);
-    return {
-      color: state.cantonsColorMode ? "#222222" : "#4d4d4d",
-      weight: state.cantonsColorMode ? 0.9 : 1.1,
-      opacity,
-      fill: state.cantonsColorMode,
-      fillColor: state.cantonsColorMode ? "#bdbdbd" : undefined,
-      fillOpacity: state.cantonsColorMode ? Math.min(1, opacity + 0.12) : 0,
-      interactive: false,
-    };
+    return cantonStyle(feature);
   }
   if (kind === "municipalities") return { color: "#8a8a8a", weight: 0.4, fill: false, interactive: false };
   return { color: "#666666", weight: 0.8, fill: false, interactive: false };
@@ -2727,6 +2803,66 @@ function renderIsosLegend(targetNode = null) {
       <div class="isos-legend-section">
         <h4>Quality Score</h4>
         ${sizeRows}
+      </div>
+    </div>
+  `;
+}
+
+function renderCantonsLegend(targetNode = null) {
+  const mount = targetNode;
+  if (!mount) return;
+
+  const checked = state.cantonsColorMode ? " checked" : "";
+  const toggleMarkup = `
+    <label class="cantons-color-toggle">
+      <input type="checkbox" data-canton-color-mode${checked}>
+      <span>Use canton colormap</span>
+    </label>
+  `;
+
+  if (!state.overlayDataLoaded.cantons) {
+    if (state.layerLoadErrors.cantons) {
+      mount.innerHTML = `
+        <div class="cantons-legend">
+          ${toggleMarkup}
+          <p class="layer-option-placeholder">Unable to load canton legend.</p>
+        </div>
+      `;
+      return;
+    }
+    mount.innerHTML = `
+      <div class="cantons-legend">
+        ${toggleMarkup}
+        <p class="layer-option-placeholder">Loading canton data ...</p>
+      </div>
+    `;
+    return;
+  }
+
+  if (!state.cantonsColorMode) {
+    mount.innerHTML = `
+      <div class="cantons-legend">
+        ${toggleMarkup}
+        <p class="layer-legend-compact">Canton boundary line overlay in grayscale.</p>
+      </div>
+    `;
+    return;
+  }
+
+  const rows = cantonLegendEntries()
+    .map((entry) => (
+      `<div class="cantons-legend-row">
+        <span class="cantons-legend-swatch" style="background:${escapeHtml(entry.color)}"></span>
+        <span>${escapeHtml(entry.name)} (${entry.cantonNumber})</span>
+      </div>`
+    ))
+    .join("");
+
+  mount.innerHTML = `
+    <div class="cantons-legend">
+      ${toggleMarkup}
+      <div class="cantons-legend-list">
+        ${rows || "<p class=\"layer-option-placeholder\">No canton entries available.</p>"}
       </div>
     </div>
   `;

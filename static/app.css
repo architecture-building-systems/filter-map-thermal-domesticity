@@ -666,6 +666,42 @@ body {
   border: 1px solid color-mix(in srgb, var(--line) 70%, #000 30%);
 }
 
+.cantons-legend {
+  display: grid;
+  gap: 0.42rem;
+}
+
+.cantons-color-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.42rem;
+  font-size: 0.74rem;
+  line-height: 1.25;
+}
+
+.cantons-legend-list {
+  display: grid;
+  gap: 0.25rem;
+  max-height: 230px;
+  overflow: auto;
+  padding-right: 0.1rem;
+}
+
+.cantons-legend-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.42rem;
+  font-size: 0.74rem;
+  line-height: 1.25;
+}
+
+.cantons-legend-swatch {
+  width: 0.9rem;
+  height: 0.9rem;
+  border-radius: 2px;
+  border: 1px solid color-mix(in srgb, var(--line) 70%, #000 30%);
+}
+
 #control-pill h1 {
   margin: 0 0 0.75rem;
   font-size: 1rem;
