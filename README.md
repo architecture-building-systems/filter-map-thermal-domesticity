@@ -26,8 +26,3 @@ Then open `http://127.0.0.1:5050`.
 7. Municipality geometry is cached to `.cache/` after first build to reduce repeated cold-start processing.
 8. Optional tuning: set `MUNI_SIMPLIFY_TOL` (default `0.0012`) to trade shape detail for faster transfer/render.
 
-## Notes
-
-1. UI uses Comfortaa from Google Fonts.
-2. Monochrome control styling with accent `#FBD124`.
-3. Bivariate fill colors remain data-driven.

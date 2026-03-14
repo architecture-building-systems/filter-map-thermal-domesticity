@@ -5,6 +5,7 @@ from __future__ import annotations
 import gzip
 from datetime import date, datetime
 import json
+import logging
 import os
 import re
 import warnings
@@ -24,6 +25,7 @@ from rasterio.warp import transform_bounds
 from .climate_metrics import CLIMATE_INDICATOR_BY_KEY, default_indicator_keys, get_climate_indicator_options
 from .compute import label_heating_options
 
+logger = logging.getLogger(__name__)
 
 @dataclass
 class HeatingAgeRecord:
@@ -136,6 +138,12 @@ class DataStore:
         self.profile_indicator_catalog: list[dict[str, object]] = []
         self.profile_core_indicator_keys: list[str] = []
 
+        self.snapshot_statpop: pd.DataFrame = pd.DataFrame()
+        self.snapshot_bds: pd.DataFrame = pd.DataFrame()
+        self.snapshot_sls_composition: pd.DataFrame = pd.DataFrame()
+        self.snapshot_canton_means: dict[str, dict[str, float]] = {}
+        self.snapshot_swiss_means: dict[str, float] = {}
+
         self._label_raster: np.ndarray | None = None
         self._pop_mask: np.ndarray | None = None
         self._max_label: int = 0
@@ -174,6 +182,7 @@ class DataStore:
         self._precompute_temperature_aggregates()
         self._load_heating_records()
         self._build_profile_caches(muni_gdf)
+        self._build_snapshot_caches()
         self._build_raster_overlays()
         self.overlay_specs = self._build_overlay_specs()
         self.overlay_payloads = {}
@@ -533,6 +542,277 @@ class DataStore:
         self.profile_bioregion_by_bfs = self._build_profile_bioregion_map(gdf)
         self.profile_heating_summary_by_bfs = self._build_profile_heating_summaries()
 
+    # ------------------------------------------------------------------
+    # Snapshot caches
+    # ------------------------------------------------------------------
+
+    _SNAPSHOT_AGE_COHORT_LABELS = [
+        "0–4", "5–9", "10–14", "15–19", "20–24", "25–29",
+        "30–34", "35–39", "40–44", "45–49", "50–54", "55–59",
+        "60–64", "65–69", "70–74", "75–79", "80–84", "85–89", "90+",
+    ]
+    _SNAPSHOT_BBM_KEYS = [f"BBM{str(i).zfill(2)}" for i in range(1, 20)]
+    _SNAPSHOT_BBW_KEYS = [f"BBW{str(i).zfill(2)}" for i in range(1, 20)]
+
+    _SNAPSHOT_ORIGIN_KEYS = ["BB21", "BB27", "BB28", "BB29", "BB30"]
+    _SNAPSHOT_ORIGIN_LABELS = {
+        "BB21": "Born in Switzerland",
+        "BB27": "Born in EU/EFTA country",
+        "BB28": "Born in other European country",
+        "BB29": "Born in non-European country",
+        "BB30": "Born abroad — unknown country",
+    }
+
+    _SNAPSHOT_GB_KEYS = [f"GB{str(i).zfill(2)}" for i in range(1, 14)]
+    _SNAPSHOT_GB_LABELS = {
+        "GB01": "Before 1919", "GB02": "1919–1945", "GB03": "1946–1960",
+        "GB04": "1961–1970", "GB05": "1971–1980", "GB06": "1981–1990",
+        "GB07": "1991–1995", "GB08": "1996–2000", "GB09": "2001–2005",
+        "GB10": "2006–2010", "GB11": "2011–2015", "GB12": "2016–2020",
+        "GB13": "2021–2023",
+    }
+
+    _SNAPSHOT_GH_KEYS = [f"GH{i}" for i in range(21, 30)]
+    _SNAPSHOT_GH_LABELS = {
+        "GH21": "Heat pump", "GH22": "Thermal solar", "GH23": "Boiler",
+        "GH24": "Stove", "GH25": "Electric heating", "GH26": "Heat exchanger",
+        "GH27": "Combined heat and power", "GH28": "Other", "GH29": "None",
+    }
+
+    _SNAPSHOT_GE_KEYS = [f"GE{i}" for i in range(21, 33)]
+    _SNAPSHOT_GE_LABELS = {
+        "GE21": "Air", "GE22": "Geothermal", "GE23": "Water",
+        "GE24": "Gas", "GE25": "Heating oil", "GE26": "Wood",
+        "GE27": "Electricity", "GE28": "Solar thermal", "GE29": "District heating",
+        "GE30": "Undetermined", "GE31": "Other", "GE32": "None",
+    }
+
+    def _build_snapshot_caches(self) -> None:
+        """Load cached parquets and pre-computed means for snapshot blocks."""
+        swiss_stats_cache = Path(self.background_dir).parent / "swiss_stats" / "cache"
+
+        def _load(key: str) -> pd.DataFrame:
+            path = swiss_stats_cache / f"{key}_by_municipality.parquet"
+            if not path.exists():
+                logger.warning("Snapshot cache missing: %s", path)
+                return pd.DataFrame()
+            df = pd.read_parquet(path)
+            df.index = df.index.astype(str)
+            return df
+
+        self.snapshot_statpop = _load("statpop")
+        self.snapshot_bds = _load("bds")
+        self.snapshot_sls_composition = _load("sls_composition")
+
+        canton_means_path = swiss_stats_cache / "canton_means.json"
+        swiss_means_path = swiss_stats_cache / "swiss_means.json"
+        if canton_means_path.exists():
+            with open(canton_means_path, encoding="utf-8") as f:
+                self.snapshot_canton_means = json.load(f)
+        if swiss_means_path.exists():
+            with open(swiss_means_path, encoding="utf-8") as f:
+                self.snapshot_swiss_means = json.load(f)
+
+        logger.info(
+            "Snapshot caches loaded: statpop=%d, bds=%d, sls_comp=%d, cantons=%d, swiss_vars=%d",
+            len(self.snapshot_statpop),
+            len(self.snapshot_bds),
+            len(self.snapshot_sls_composition),
+            len(self.snapshot_canton_means),
+            len(self.snapshot_swiss_means),
+        )
+
+    @staticmethod
+    def _snap_items(
+        row: "pd.Series",
+        keys: list[str],
+        labels: dict[str, str],
+        total: float,
+    ) -> list[dict]:
+        """Build snapshot items list from a data row."""
+        items = []
+        for k in keys:
+            val = _safe_float(row.get(k), float("nan"))
+            if not np.isfinite(val):
+                val = 0.0
+            share = round(100.0 * val / total, 2) if total > 0 else 0.0
+            items.append({
+                "code": k,
+                "label": labels.get(k, k),
+                "value": int(round(val)),
+                "share_pct": share,
+            })
+        return sorted(items, key=lambda x: -x["value"])
+
+    @staticmethod
+    def _snap_mean_items(
+        means: dict[str, float],
+        prefix: str,
+        keys: list[str],
+        labels: dict[str, str],
+    ) -> list[dict]:
+        """Build snapshot items list from pre-computed means dict."""
+        items = []
+        total = sum(
+            means.get(f"{prefix}{k}", 0.0) or 0.0 for k in keys
+        )
+        for k in keys:
+            val = means.get(f"{prefix}{k}", 0.0) or 0.0
+            share = round(100.0 * val / total, 2) if total > 0 else 0.0
+            items.append({
+                "code": k,
+                "label": labels.get(k, k),
+                "value": round(val, 2),
+                "share_pct": share,
+            })
+        return sorted(items, key=lambda x: -x["value"])
+
+    @staticmethod
+    def _snap_composition_items(
+        row: "pd.Series | None",
+        prefix: str,
+        code_label_map: dict[int, str],
+    ) -> list[dict]:
+        """Build snapshot items from SLS composition wide-format row."""
+        if row is None:
+            return []
+        items = []
+        total = 0.0
+        for code, label in code_label_map.items():
+            col = f"{prefix}__{code}"
+            val = float(row.get(col, 0) or 0)
+            total += val
+        for code, label in code_label_map.items():
+            col = f"{prefix}__{code}"
+            val = float(row.get(col, 0) or 0)
+            share = round(100.0 * val / total, 2) if total > 0 else 0.0
+            items.append({
+                "code": code,
+                "label": label,
+                "value": int(round(val)),
+                "share_pct": share,
+            })
+        return sorted(items, key=lambda x: -x["value"])
+
+    @staticmethod
+    def _snap_composition_mean_items(
+        means: dict[str, float],
+        prefix: str,
+        code_label_map: dict[int, str],
+    ) -> list[dict]:
+        """Build snapshot mean items from pre-computed composition means."""
+        items = []
+        total = sum(
+            means.get(f"sls_composition__{prefix}__{code}", 0.0) or 0.0
+            for code in code_label_map
+        )
+        for code, label in code_label_map.items():
+            val = means.get(f"sls_composition__{prefix}__{code}", 0.0) or 0.0
+            share = round(100.0 * val / total, 2) if total > 0 else 0.0
+            items.append({
+                "code": code,
+                "label": label,
+                "value": round(val, 2),
+                "share_pct": share,
+            })
+        return sorted(items, key=lambda x: -x["value"])
+
+    def _build_snapshot_block(self, key: str, canton_key: str) -> dict | None:
+        """Build the snapshot payload block for a single municipality."""
+        from swiss_stats.variable_catalog import SLS_CLASS_LABELS
+
+        sp_row = self.snapshot_statpop.loc[key] if key in self.snapshot_statpop.index else None
+        bds_row = self.snapshot_bds.loc[key] if key in self.snapshot_bds.index else None
+        sls_row = self.snapshot_sls_composition.loc[key] if key in self.snapshot_sls_composition.index else None
+
+        canton_means = self.snapshot_canton_means.get(canton_key, {})
+        swiss_means = self.snapshot_swiss_means
+
+        # Swiss-born ratio
+        swiss_ratio: dict = {}
+        if sp_row is not None:
+            swiss = int(round(_safe_float(sp_row.get("BB11"), 0.0) or 0.0))
+            non_swiss = int(round(_safe_float(sp_row.get("BB12"), 0.0) or 0.0))
+            denom = max(non_swiss, 1)
+            ratio_str = f"{swiss / denom:.1f} : 1"
+            swiss_ratio = {"swiss": swiss, "non_swiss": non_swiss, "ratio": ratio_str}
+
+        # Origin
+        origin_total = float(
+            sum(_safe_float(sp_row.get(k), 0.0) or 0.0 for k in self._SNAPSHOT_ORIGIN_KEYS)
+        ) if sp_row is not None else 0.0
+        origin_items = self._snap_items(sp_row, self._SNAPSHOT_ORIGIN_KEYS, self._SNAPSHOT_ORIGIN_LABELS, origin_total) if sp_row is not None else []
+        origin_canton = self._snap_mean_items(canton_means, "statpop__", self._SNAPSHOT_ORIGIN_KEYS, self._SNAPSHOT_ORIGIN_LABELS)
+        origin_swiss = self._snap_mean_items(swiss_means, "statpop__", self._SNAPSHOT_ORIGIN_KEYS, self._SNAPSHOT_ORIGIN_LABELS)
+
+        # Age distribution
+        male_vals = [int(round(_safe_float(sp_row.get(k), 0.0) or 0.0)) for k in self._SNAPSHOT_BBM_KEYS] if sp_row is not None else []
+        female_vals = [int(round(_safe_float(sp_row.get(k), 0.0) or 0.0)) for k in self._SNAPSHOT_BBW_KEYS] if sp_row is not None else []
+        age_distribution: dict = {
+            "cohorts": self._SNAPSHOT_AGE_COHORT_LABELS,
+            "male": male_vals,
+            "female": female_vals,
+            "items": [
+                {"code": f"M{lbl}", "label": lbl, "value": m, "share_pct": 0.0}
+                for lbl, m in zip(self._SNAPSHOT_AGE_COHORT_LABELS, male_vals)
+            ] if male_vals else [],
+        }
+
+        # Construction period
+        gb_total = float(sum(_safe_float(bds_row.get(k), 0.0) or 0.0 for k in self._SNAPSHOT_GB_KEYS)) if bds_row is not None else 0.0
+        construction_period = {
+            "items": self._snap_items(bds_row, self._SNAPSHOT_GB_KEYS, self._SNAPSHOT_GB_LABELS, gb_total) if bds_row is not None else [],
+            "canton_mean": self._snap_mean_items(canton_means, "bds__", self._SNAPSHOT_GB_KEYS, self._SNAPSHOT_GB_LABELS),
+            "swiss_mean": self._snap_mean_items(swiss_means, "bds__", self._SNAPSHOT_GB_KEYS, self._SNAPSHOT_GB_LABELS),
+        }
+
+        # Heat source
+        ge_total = float(sum(_safe_float(bds_row.get(k), 0.0) or 0.0 for k in self._SNAPSHOT_GE_KEYS)) if bds_row is not None else 0.0
+        heat_source = {
+            "items": self._snap_items(bds_row, self._SNAPSHOT_GE_KEYS, self._SNAPSHOT_GE_LABELS, ge_total) if bds_row is not None else [],
+            "canton_mean": self._snap_mean_items(canton_means, "bds__", self._SNAPSHOT_GE_KEYS, self._SNAPSHOT_GE_LABELS),
+            "swiss_mean": self._snap_mean_items(swiss_means, "bds__", self._SNAPSHOT_GE_KEYS, self._SNAPSHOT_GE_LABELS),
+        }
+
+        # Heat generator
+        gh_total = float(sum(_safe_float(bds_row.get(k), 0.0) or 0.0 for k in self._SNAPSHOT_GH_KEYS)) if bds_row is not None else 0.0
+        heat_generator = {
+            "items": self._snap_items(bds_row, self._SNAPSHOT_GH_KEYS, self._SNAPSHOT_GH_LABELS, gh_total) if bds_row is not None else [],
+            "canton_mean": self._snap_mean_items(canton_means, "bds__", self._SNAPSHOT_GH_KEYS, self._SNAPSHOT_GH_LABELS),
+            "swiss_mean": self._snap_mean_items(swiss_means, "bds__", self._SNAPSHOT_GH_KEYS, self._SNAPSHOT_GH_LABELS),
+        }
+
+        # Land use 10-class
+        lu10_labels = SLS_CLASS_LABELS.get("LU_10", {})
+        land_use_10 = {
+            "items": self._snap_composition_items(sls_row, "LU18_10", lu10_labels),
+            "canton_mean": self._snap_composition_mean_items(canton_means, "LU18_10", lu10_labels),
+            "swiss_mean": self._snap_composition_mean_items(swiss_means, "LU18_10", lu10_labels),
+        }
+
+        # Area statistics 17-class
+        as17_labels = SLS_CLASS_LABELS.get("AS_17", {})
+        area_stats_17 = {
+            "items": self._snap_composition_items(sls_row, "AS18_17", as17_labels),
+            "canton_mean": self._snap_composition_mean_items(canton_means, "AS18_17", as17_labels),
+            "swiss_mean": self._snap_composition_mean_items(swiss_means, "AS18_17", as17_labels),
+        }
+
+        return {
+            "swiss_ratio": swiss_ratio,
+            "origin": {
+                "items": origin_items,
+                "canton_mean": origin_canton,
+                "swiss_mean": origin_swiss,
+            },
+            "age_distribution": age_distribution,
+            "construction_period": construction_period,
+            "heat_source": heat_source,
+            "heat_generator": heat_generator,
+            "land_use_10": land_use_10,
+            "area_stats_17": area_stats_17,
+        }
+
     def get_municipality_profile(self, bfs: str | int) -> dict | None:
         parsed_bfs = _safe_int(bfs, None)
         if parsed_bfs is None:
@@ -693,6 +973,7 @@ class DataStore:
                     "message": "Detailed intra-municipality elevation profile is not available in this MVP.",
                 }
             },
+            "snapshot": self._build_snapshot_block(key, canton_key),
         }
         self.profile_cache[key] = payload
         return payload

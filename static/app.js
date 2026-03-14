@@ -68,6 +68,7 @@ const state = {
   bootHintTimer: null,
   topRowNavWired: false,
   cantonsColorMode: false,
+  snapshotGalleryIndex: 0,
   bioregionColorMap: {},
   bioregionOrder: [],
   bioregionPatternReady: false,
@@ -197,6 +198,7 @@ const LAYER_DEFAULT_ORDER = [
 
 const MUNICIPALITY_MODAL_TABS = [
   { id: "overview", label: "Overview" },
+  { id: "snapshot", label: "Snapshot" },
   { id: "climate", label: "Climate & Bioclimatic" },
   { id: "built", label: "Built Environment" },
   { id: "context", label: "Context" },
@@ -602,6 +604,40 @@ function buildMunicipalityOverviewTab(profile) {
     </article>
   `);
 
+  const snapshotData = profile?.snapshot;
+  if (snapshotData) {
+    const snapshotRows = SNAPSHOT_PANELS.filter((p) => !p.hideFromOverview).map((panel) => {
+      const data = snapshotData[panel.id];
+      let headline = "N/A";
+      if (panel.id === "swiss_ratio") {
+        headline = data?.ratio ?? "N/A";
+      } else if (data?.items?.length) {
+        const top = data.items[0];
+        headline = `${escapeHtml(top.label || String(top.code))} (${formatMetricValue(top.share_pct, 1)}%)`;
+      }
+      return `<tr>
+        <td>${escapeHtml(panel.title)}</td>
+        <td>${escapeHtml(String(headline))}</td>
+      </tr>`;
+    }).join("");
+
+    cards.push(`
+      <article class="municipality-card">
+        <h3>Statistics Overview</h3>
+        <table class="municipality-table">
+          <thead>
+            <tr>
+              <th>Statistic</th>
+              <th>Headline value</th>
+            </tr>
+          </thead>
+          <tbody>${snapshotRows}</tbody>
+        </table>
+        <p class="municipality-inline-note">Full interactive charts are available in the Snapshot tab.</p>
+      </article>
+    `);
+  }
+
   return `<section class="municipality-tab-grid">${cards.join("")}</section>`;
 }
 
@@ -748,8 +784,316 @@ function buildMunicipalityContextTab(profile) {
   `;
 }
 
+// ---------------------------------------------------------------------------
+// Chart helpers (Chart.js)
+// ---------------------------------------------------------------------------
+
+const _chartInstances = {};
+
+function destroyChart(canvasId) {
+  if (_chartInstances[canvasId]) {
+    _chartInstances[canvasId].destroy();
+    delete _chartInstances[canvasId];
+  }
+}
+
+function destroyAllCharts() {
+  Object.keys(_chartInstances).forEach(destroyChart);
+}
+
+const SNAPSHOT_PALETTE = [
+  "#1f77b4", "#aec7e8", "#ff7f0e", "#ffbb78",
+  "#2ca02c", "#98df8a", "#d62728", "#ff9896",
+  "#9467bd", "#c5b0d5", "#8c564b", "#c49c94",
+  "#e377c2", "#f7b6d2", "#bcbd22", "#dbdb8d",
+  "#17becf", "#9edae5", "#7f7f7f", "#c7c7c7",
+];
+const SNAPSHOT_NONE_COLOUR = "#aaaaaa";
+
+const _chartFontFamily = "Comfortaa, sans-serif";
+
+function renderPieChart(canvasId, labels, values, colours) {
+  destroyChart(canvasId);
+  const canvas = document.getElementById(canvasId);
+  if (!canvas || !window.Chart) return;
+  _chartInstances[canvasId] = new Chart(canvas, {
+    type: "doughnut",
+    data: {
+      labels,
+      datasets: [{
+        data: values,
+        backgroundColor: colours || SNAPSHOT_PALETTE.slice(0, values.length),
+        borderWidth: 1,
+        borderColor: "#fff",
+      }],
+    },
+    options: {
+      maintainAspectRatio: false,
+      plugins: {
+        legend: {
+          position: "right",
+          labels: { font: { family: _chartFontFamily, size: 11 }, boxWidth: 14, padding: 8 },
+        },
+        tooltip: {
+          bodyFont: { family: _chartFontFamily },
+          titleFont: { family: _chartFontFamily },
+        },
+      },
+    },
+  });
+}
+
+function renderBarChart(canvasId, labels, values, colours) {
+  destroyChart(canvasId);
+  const canvas = document.getElementById(canvasId);
+  if (!canvas || !window.Chart) return;
+  _chartInstances[canvasId] = new Chart(canvas, {
+    type: "bar",
+    data: {
+      labels,
+      datasets: [{
+        data: values,
+        backgroundColor: colours || SNAPSHOT_PALETTE[0],
+        borderWidth: 0,
+      }],
+    },
+    options: {
+      indexAxis: "y",
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          bodyFont: { family: _chartFontFamily },
+          titleFont: { family: _chartFontFamily },
+        },
+      },
+      scales: {
+        x: {
+          grid: { color: "#f0f0f0" },
+          ticks: { font: { family: _chartFontFamily, size: 11 } },
+        },
+        y: {
+          grid: { display: false },
+          ticks: { font: { family: _chartFontFamily, size: 11 } },
+        },
+      },
+    },
+  });
+}
+
+function renderStackedBarChart(canvasId, cohorts, maleValues, femaleValues) {
+  destroyChart(canvasId);
+  const canvas = document.getElementById(canvasId);
+  if (!canvas || !window.Chart) return;
+  _chartInstances[canvasId] = new Chart(canvas, {
+    type: "bar",
+    data: {
+      labels: cohorts,
+      datasets: [
+        {
+          label: "Male",
+          data: maleValues,
+          backgroundColor: "#4a6f8a",
+          borderWidth: 0,
+        },
+        {
+          label: "Female",
+          data: femaleValues,
+          backgroundColor: "#c87c5c",
+          borderWidth: 0,
+        },
+      ],
+    },
+    options: {
+      indexAxis: "y",
+      maintainAspectRatio: false,
+      plugins: {
+        legend: {
+          position: "top",
+          labels: { font: { family: _chartFontFamily, size: 11 } },
+        },
+        tooltip: {
+          bodyFont: { family: _chartFontFamily },
+          titleFont: { family: _chartFontFamily },
+        },
+      },
+      scales: {
+        x: {
+          grid: { color: "#f0f0f0" },
+          ticks: { font: { family: _chartFontFamily, size: 11 } },
+        },
+        y: {
+          grid: { display: false },
+          ticks: { font: { family: _chartFontFamily, size: 11 } },
+        },
+      },
+    },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Snapshot gallery
+// ---------------------------------------------------------------------------
+
+const SNAPSHOT_PANELS = [
+  { id: "swiss_ratio",         title: "Swiss-Born Ratio",               subtitle: "Proportion of Swiss-born to foreign-born residents",    sortMode: null,       hideFromOverview: false },
+  { id: "origin",              title: "Origin",                          subtitle: "Resident origin by region",                             sortMode: "by_label", hideFromOverview: true  },
+  { id: "age_distribution",    title: "Age Distribution",                subtitle: "Population by five-year age cohort",                   sortMode: null,       hideFromOverview: false },
+  { id: "construction_period", title: "Construction Period",             subtitle: "Buildings by decade of construction",                   sortMode: "by_code",  hideFromOverview: false },
+  { id: "heat_source",         title: "Heat Source",                     subtitle: "Buildings by primary energy source",                    sortMode: "by_label", hideFromOverview: false },
+  { id: "heat_generator",      title: "Heat Generator",                  subtitle: "Buildings by heat generation system",                   sortMode: "by_label", hideFromOverview: false },
+  { id: "land_use_10",         title: "Land Use (10 Classes)",           subtitle: "Land use composition by 10 major categories (LU18)",    sortMode: null,       hideFromOverview: true  },
+  { id: "area_stats_17",       title: "Area Statistics (17 Classes)",    subtitle: "Area statistics composition by 17 categories (AS18)",   sortMode: null,       hideFromOverview: false },
+];
+
+function buildSnapshotGalleryHtml(instanceId) {
+  const opts = SNAPSHOT_PANELS.map((p, i) =>
+    `<option value="${i}">${escapeHtml(p.title)}</option>`
+  ).join("");
+  return `
+    <div class="snapshot-gallery" id="snapshot-gallery-${instanceId}">
+      <div class="snapshot-gallery-header">
+        <select class="snapshot-gallery-select" id="snapshot-select-${instanceId}" aria-label="Select statistic panel">
+          ${opts}
+        </select>
+      </div>
+      <div class="snapshot-gallery-nav-row">
+        <button class="snapshot-gallery-nav" id="snapshot-prev-${instanceId}" type="button" aria-label="Previous panel" disabled>&#8249;</button>
+        <div class="snapshot-gallery-card" id="snapshot-card-${instanceId}">
+          <div class="snapshot-gallery-card-title" id="snapshot-title-${instanceId}"></div>
+          <div class="snapshot-gallery-card-subtitle" id="snapshot-subtitle-${instanceId}"></div>
+          <div class="snapshot-gallery-card-body" id="snapshot-body-${instanceId}"></div>
+        </div>
+        <button class="snapshot-gallery-nav" id="snapshot-next-${instanceId}" type="button" aria-label="Next panel">&#8250;</button>
+      </div>
+    </div>
+  `;
+}
+
+function _sortSnapshotItems(items, sortMode) {
+  const isNone = (it) => (it.label || "").toLowerCase() === "none";
+  const normal = items.filter((it) => !isNone(it));
+  const noneItems = items.filter(isNone);
+  if (sortMode === "by_label") {
+    normal.sort((a, b) => (a.label || "").localeCompare(b.label || ""));
+  } else if (sortMode === "by_code") {
+    normal.sort((a, b) => String(a.code).localeCompare(String(b.code)));
+  }
+  return [...normal, ...noneItems];
+}
+
+function _snapshotItemColours(items) {
+  let paletteIdx = 0;
+  return items.map((it) => {
+    if ((it.label || "").toLowerCase() === "none") return SNAPSHOT_NONE_COLOUR;
+    return SNAPSHOT_PALETTE[paletteIdx++ % SNAPSHOT_PALETTE.length];
+  });
+}
+
+function renderSnapshotPanel(instanceId, snapshot, index) {
+  const panel = SNAPSHOT_PANELS[index];
+  if (!panel) return;
+
+  const titleEl = document.getElementById(`snapshot-title-${instanceId}`);
+  const subtitleEl = document.getElementById(`snapshot-subtitle-${instanceId}`);
+  const bodyEl = document.getElementById(`snapshot-body-${instanceId}`);
+  const prevBtn = document.getElementById(`snapshot-prev-${instanceId}`);
+  const nextBtn = document.getElementById(`snapshot-next-${instanceId}`);
+  const selectEl = document.getElementById(`snapshot-select-${instanceId}`);
+
+  if (!titleEl || !bodyEl) return;
+
+  if (titleEl) titleEl.textContent = panel.title;
+  if (subtitleEl) subtitleEl.textContent = panel.subtitle;
+  if (prevBtn) prevBtn.disabled = index === 0;
+  if (nextBtn) nextBtn.disabled = index === SNAPSHOT_PANELS.length - 1;
+  if (selectEl) selectEl.value = String(index);
+
+  const canvasId = `snapshot-canvas-${instanceId}`;
+  destroyChart(canvasId);
+
+  const data = snapshot?.[panel.id];
+
+  if (panel.id === "swiss_ratio") {
+    const ratio = data?.ratio ?? "N/A";
+    const swiss = (data?.swiss ?? 0).toLocaleString();
+    const nonSwiss = (data?.non_swiss ?? 0).toLocaleString();
+    bodyEl.innerHTML = `
+      <div class="snapshot-ratio-display">${escapeHtml(ratio)}</div>
+      <div class="snapshot-ratio-detail">
+        <span>Swiss-born: <strong>${escapeHtml(swiss)}</strong></span>
+        <span>Foreign-born: <strong>${escapeHtml(nonSwiss)}</strong></span>
+      </div>
+    `;
+    return;
+  }
+
+  bodyEl.innerHTML = `<canvas id="${canvasId}"></canvas>`;
+
+  const items = Array.isArray(data?.items) ? data.items : [];
+  if (!items.length) {
+    bodyEl.innerHTML = `<p class="snapshot-no-data">No data available for this municipality.</p>`;
+    return;
+  }
+
+  if (panel.id === "age_distribution") {
+    const cohorts = Array.isArray(data?.cohorts) ? data.cohorts : items.map((it) => it.label || String(it.code));
+    const male = Array.isArray(data?.male) ? data.male : items.map((it) => it.value ?? 0);
+    const female = Array.isArray(data?.female) ? data.female : [];
+    renderStackedBarChart(canvasId, cohorts, male, female);
+  } else if (panel.id === "land_use_10" || panel.id === "area_stats_17") {
+    const labels = items.map((it) => it.label || String(it.code));
+    const values = items.map((it) => it.value ?? 0);
+    renderBarChart(canvasId, labels, values);
+  } else {
+    const sorted = _sortSnapshotItems(items, panel.sortMode);
+    const labels = sorted.map((it) => it.label || String(it.code));
+    const values = sorted.map((it) => it.value ?? 0);
+    const colours = _snapshotItemColours(sorted);
+    renderPieChart(canvasId, labels, values, colours);
+  }
+}
+
+function wireSnapshotGallery(instanceId, snapshot, initialIndex) {
+  let index = Math.max(0, Math.min(SNAPSHOT_PANELS.length - 1, initialIndex || 0));
+
+  function go(newIndex) {
+    index = Math.max(0, Math.min(SNAPSHOT_PANELS.length - 1, newIndex));
+    state.snapshotGalleryIndex = index;
+    renderSnapshotPanel(instanceId, snapshot, index);
+  }
+
+  const prevBtn = document.getElementById(`snapshot-prev-${instanceId}`);
+  const nextBtn = document.getElementById(`snapshot-next-${instanceId}`);
+  const selectEl = document.getElementById(`snapshot-select-${instanceId}`);
+
+  if (prevBtn) prevBtn.addEventListener("click", () => go(index - 1));
+  if (nextBtn) nextBtn.addEventListener("click", () => go(index + 1));
+  if (selectEl) selectEl.addEventListener("change", (e) => go(parseInt(e.target.value, 10)));
+
+  renderSnapshotPanel(instanceId, snapshot, index);
+}
+
+function buildMunicipalitySnapshotTab(profile) {
+  const snapshot = profile?.snapshot;
+  const instanceId = "main";
+  const galleryHtml = buildSnapshotGalleryHtml(instanceId);
+  setTimeout(() => wireSnapshotGallery(instanceId, snapshot, state.snapshotGalleryIndex || 0), 0);
+  return `
+    <section class="municipality-tab-grid">
+      <article class="municipality-card municipality-card--full">
+        <h3>Statistics Snapshot</h3>
+        ${snapshot
+          ? galleryHtml
+          : '<p class="municipality-inline-note">Statistics data is not yet available for this municipality.</p>'}
+      </article>
+    </section>
+  `;
+}
+
 function municipalityTabMarkup(profile, tabId) {
   if (tabId === "overview") return buildMunicipalityOverviewTab(profile);
+  if (tabId === "snapshot") return buildMunicipalitySnapshotTab(profile);
   if (tabId === "climate") return buildMunicipalityClimateTab(profile);
   if (tabId === "built") return buildMunicipalityBuiltTab(profile);
   return buildMunicipalityContextTab(profile);
@@ -1018,6 +1362,7 @@ async function openMunicipalityModal(bfs, preferredTab = "overview") {
 
 function closeMunicipalityModal() {
   if (!state.municipalityModalOpen) return;
+  destroyAllCharts();
   state.municipalityModalOpen = false;
   state.municipalityModalProfileLoading = false;
   state.municipalityModalProfileError = "";

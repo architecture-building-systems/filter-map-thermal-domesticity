@@ -1,0 +1,6 @@
+swisslandstats-geopy
+geopandas
+pandas
+numpy
+openpyxl
+pyarrow

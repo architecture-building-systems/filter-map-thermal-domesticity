@@ -1835,3 +1835,153 @@ body.modal-open {
     grid-template-columns: 1fr;
   }
 }
+
+/* ---------------------------------------------------------------------------
+   Municipality card full-width variant
+--------------------------------------------------------------------------- */
+
+.municipality-card--full {
+  grid-column: 1 / -1;
+}
+
+/* ---------------------------------------------------------------------------
+   Snapshot gallery
+--------------------------------------------------------------------------- */
+
+.snapshot-gallery {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.snapshot-gallery-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.snapshot-gallery-select {
+  flex: 1;
+  font-family: "Comfortaa", sans-serif;
+  font-size: 0.875rem;
+  padding: 0.35rem 0.6rem;
+  border: 1px solid var(--line, #e0e0e0);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--text, #1a1a1a);
+  cursor: pointer;
+  outline: none;
+}
+
+.snapshot-gallery-select:focus-visible {
+  outline: 2px solid #fbd124;
+  outline-offset: 2px;
+}
+
+.snapshot-gallery-nav-row {
+  display: flex;
+  align-items: stretch;
+  gap: 0.5rem;
+}
+
+.snapshot-gallery-nav {
+  flex-shrink: 0;
+  width: 2.25rem;
+  border: 1px solid var(--line, #e0e0e0);
+  border-radius: 6px;
+  background: #fff;
+  font-size: 1.4rem;
+  line-height: 1;
+  color: var(--text, #1a1a1a);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.12s, color 0.12s;
+}
+
+.snapshot-gallery-nav:hover:not(:disabled) {
+  background: #fbd124;
+  border-color: #fbd124;
+}
+
+.snapshot-gallery-nav:focus-visible {
+  outline: 2px solid #fbd124;
+  outline-offset: 2px;
+}
+
+.snapshot-gallery-nav:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.snapshot-gallery-card {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--line, #e0e0e0);
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.snapshot-gallery-card-title {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--text, #1a1a1a);
+}
+
+.snapshot-gallery-card-subtitle {
+  font-size: 0.78rem;
+  color: #666;
+  margin-bottom: 0.35rem;
+}
+
+.snapshot-gallery-card-body {
+  flex: 1;
+  position: relative;
+  min-height: 260px;
+}
+
+.snapshot-gallery-card-body canvas {
+  position: absolute;
+  inset: 0;
+  width: 100% !important;
+  height: 100% !important;
+}
+
+.snapshot-ratio-display {
+  font-size: 2.8rem;
+  font-weight: 700;
+  color: var(--text, #1a1a1a);
+  text-align: center;
+  padding: 1.5rem 0 0.75rem;
+  letter-spacing: 0.02em;
+}
+
+.snapshot-ratio-detail {
+  display: flex;
+  justify-content: center;
+  gap: 1.5rem;
+  font-size: 0.85rem;
+  color: #555;
+  flex-wrap: wrap;
+}
+
+.snapshot-no-data {
+  font-size: 0.85rem;
+  color: #888;
+  padding: 1rem 0;
+  text-align: center;
+}
+
+@media (max-width: 600px) {
+  .snapshot-gallery-card-body {
+    min-height: 220px;
+  }
+
+  .snapshot-ratio-display {
+    font-size: 2rem;
+  }
+}
