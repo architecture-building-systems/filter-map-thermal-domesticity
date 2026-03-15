@@ -30,6 +30,7 @@ const state = {
   selectedHearthSystemZones: new Set(),
   materialZoneColorMap: {},
   hearthZoneColorMap: {},
+  materialHearthZoneColorMap: {},
   applyMaterialFilter: true,
   applyHearthFilter: true,
   applyClimatePriority: true,
@@ -42,6 +43,8 @@ const state = {
   analysisStackOpenExceptional: false,
   analysisStackOpenExceptionalInfo: false,
   legendSelectedClasses: new Set(),
+  legendSelectedMaterialHearthGroups: new Set(),
+  municipalityLegendExceptionalOnly: false,
   map: null,
   muniLayer: null,
   layerOrder: [],
@@ -59,6 +62,7 @@ const state = {
   hoverSelectedFields: {},
   layerStackOpenMain: {},
   layerStackOpenLegend: {},
+  layerLegendScrollTop: {},
   healthWarning: "",
   isosLayerColorMap: {},
   isosIconCache: {},
@@ -91,6 +95,7 @@ const MUNICIPALITY_DISPLAY_MODES = {
   BIVARIATE: "bivariate",
   MATERIAL: "building_material_zone",
   HEARTH: "hearth_system_zone",
+  MATERIAL_HEARTH: "material_hearth_zone",
 };
 const MATERIAL_ZONE_COLORS = [
   "#4c78a8",
@@ -109,6 +114,24 @@ const HEARTH_ZONE_COLORS = [
   "#6c7c9b",
   "#477f7b",
   "#8b4d4d",
+];
+const MATERIAL_HEARTH_ZONE_COLORS = [
+  "#4e79a7",
+  "#f28e2b",
+  "#e15759",
+  "#76b7b2",
+  "#59a14f",
+  "#edc948",
+  "#b07aa1",
+  "#ff9da7",
+  "#9c755f",
+  "#bab0ab",
+  "#5f8fbf",
+  "#7a9e48",
+  "#ca6f5c",
+  "#5d6d7e",
+  "#8f77b5",
+  "#d6a54e",
 ];
 const MATERIAL_SHORT_BY_ZONE = {
   1: "Wall/plaster",
@@ -266,6 +289,12 @@ const ISOS_LAYER_COLORS = {
   Bild: "#1f77b4",
   Ortsbild: "#17becf",
 };
+const CLIMATE_DEFAULT_INDICATOR_KEYS = [
+  "CDD_change_gwl3.0",
+  "HDD_change_gwl3.0",
+  "TropNights_change_gwl3.0",
+  "BIO03_change_gwl3.0",
+];
 
 const ISOS_FALLBACK_LAYER_PALETTE = [
   "#4c78a8",
@@ -317,7 +346,17 @@ const FRIENDLY_FIELD_LABELS = {
 };
 
 const DEFAULT_HOVER_FIELDS = {
-  bivariate_municipalities: ["name", "canton_name", "temp", "pct_old1919", "bi_class"],
+  bivariate_municipalities: [
+    "canton_name",
+    "temp",
+    "pct_old1919",
+    "bi_class",
+    "building_material_zone",
+    "building_material_zone_number",
+    "hearth_system_zone",
+    "hearth_system_zone_number",
+    "material+hearth_zone",
+  ],
   bioregions: ["RegionName", "DEBioBedeu"],
   isos: ["Text", "year", "layer"],
 };
@@ -400,6 +439,7 @@ function normalizeMunicipalityDisplayMode(value) {
   const mode = String(value || "").trim();
   if (mode === MUNICIPALITY_DISPLAY_MODES.MATERIAL) return MUNICIPALITY_DISPLAY_MODES.MATERIAL;
   if (mode === MUNICIPALITY_DISPLAY_MODES.HEARTH) return MUNICIPALITY_DISPLAY_MODES.HEARTH;
+  if (mode === MUNICIPALITY_DISPLAY_MODES.MATERIAL_HEARTH) return MUNICIPALITY_DISPLAY_MODES.MATERIAL_HEARTH;
   return MUNICIPALITY_DISPLAY_MODES.BIVARIATE;
 }
 
@@ -1858,6 +1898,106 @@ function resolveHearthZoneColor(labelValue) {
   return HEARTH_ZONE_COLORS[fallbackIdx] || FALLBACK_FILL;
 }
 
+function materialHearthCodeFromRecord(rec = {}) {
+  return deriveMaterialHearthCode({
+    materialHearthZone: rec?.["material+hearth_zone"],
+    zoneNumber: rec?.building_material_zone_number,
+    hearthSystemZoneNumber: rec?.hearth_system_zone_number,
+  });
+}
+
+function materialHearthLegendEntryFromRecord(rec = {}) {
+  const zoneNumber = normalizeMaterialZoneNumber(rec?.building_material_zone_number);
+  const zoneLabel = zoneNumber === null ? "Unspecified" : materialZoneLabel(zoneNumber);
+  const hearthLabel = hearthZoneLabel(rec?.hearth_system_zone);
+  const comboCode = materialHearthCodeFromRecord(rec);
+  const hearthCode = deriveHearthCode(rec?.hearth_system_zone_number, comboCode);
+  const materialShort = summarizeMaterialLabel(zoneNumber, zoneLabel);
+  const hearthShort = summarizeHearthLabel(hearthLabel, hearthCode);
+  return {
+    code: comboCode,
+    zoneNumber,
+    zoneLabel,
+    materialShort,
+    hearthShort,
+    label: `${materialShort} · ${hearthShort}`,
+  };
+}
+
+function collectMaterialHearthLegendEntries() {
+  const byCode = new Map();
+  Object.values(state.records || {}).forEach((rec) => {
+    const entry = materialHearthLegendEntryFromRecord(rec || {});
+    if (!entry.code || byCode.has(entry.code)) return;
+    byCode.set(entry.code, entry);
+  });
+  return [...byCode.values()].sort((a, b) => {
+    const az = a.zoneNumber === null ? Number.POSITIVE_INFINITY : Number(a.zoneNumber);
+    const bz = b.zoneNumber === null ? Number.POSITIVE_INFINITY : Number(b.zoneNumber);
+    if (az !== bz) return az - bz;
+    const hearthCmp = String(a.hearthShort || "").localeCompare(String(b.hearthShort || ""));
+    if (hearthCmp !== 0) return hearthCmp;
+    return String(a.code || "").localeCompare(String(b.code || ""));
+  });
+}
+
+function buildMaterialHearthZoneColorMap() {
+  state.materialHearthZoneColorMap = {};
+  const entries = collectMaterialHearthLegendEntries();
+  entries.forEach((entry, idx) => {
+    const fallbackIdx = hashString(entry.code) % MATERIAL_HEARTH_ZONE_COLORS.length;
+    state.materialHearthZoneColorMap[entry.code] =
+      MATERIAL_HEARTH_ZONE_COLORS[idx] || MATERIAL_HEARTH_ZONE_COLORS[fallbackIdx] || "#8a8a8a";
+  });
+}
+
+function resolveMaterialHearthZoneColor(recOrCode = null) {
+  const code = typeof recOrCode === "string"
+    ? String(recOrCode || "").trim()
+    : materialHearthCodeFromRecord(recOrCode || {});
+  if (!code) return FALLBACK_FILL;
+  if (state.materialHearthZoneColorMap[code]) return state.materialHearthZoneColorMap[code];
+  const fallbackIdx = hashString(code) % MATERIAL_HEARTH_ZONE_COLORS.length;
+  return MATERIAL_HEARTH_ZONE_COLORS[fallbackIdx] || FALLBACK_FILL;
+}
+
+function exceptionalLegendCoverage() {
+  const coverage = {
+    hasAny: false,
+    biClasses: new Set(),
+    materialZones: new Set(),
+    hearthZones: new Set(),
+    materialHearthCodes: new Set(),
+  };
+  [...state.exceptional].forEach((bfs) => {
+    const rec = state.records[String(bfs)];
+    if (!rec) return;
+    coverage.hasAny = true;
+
+    const biClass = String(rec.bi_class || "").trim();
+    if (biClass) coverage.biClasses.add(biClass);
+
+    const zoneNumber = normalizeMaterialZoneNumber(rec.building_material_zone_number);
+    if (zoneNumber !== null) coverage.materialZones.add(zoneNumber);
+
+    coverage.hearthZones.add(hearthZoneLabel(rec.hearth_system_zone));
+
+    const materialHearthCode = materialHearthCodeFromRecord(rec);
+    if (materialHearthCode) coverage.materialHearthCodes.add(materialHearthCode);
+  });
+  return coverage;
+}
+
+function municipalityLegendExceptionalToggleMarkup() {
+  const checked = state.municipalityLegendExceptionalOnly ? " checked" : "";
+  return `
+    <label class="legend-filter-toggle">
+      <input type="checkbox" data-municipality-legend-exceptional${checked}>
+      <span>Exceptional only</span>
+    </label>
+  `;
+}
+
 function normalizeCantonNumber(value) {
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) return null;
@@ -2480,7 +2620,13 @@ function municipalityDataObject(feature) {
 }
 
 function buildTooltipHtml(layerKey, dataObj) {
-  const title = state.layerDisplayNames[layerKey] || layerKey;
+  let title = state.layerDisplayNames[layerKey] || layerKey;
+  if (layerKey === "bivariate_municipalities") {
+    const municipalityName = String(dataObj?.name || dataObj?.NAME || "").trim();
+    if (municipalityName) {
+      title = municipalityName;
+    }
+  }
   const schema = state.hoverSchemas[layerKey] || [];
   const selected = state.hoverSelectedFields[layerKey] || new Set();
   const fields = schema.filter((key) => selected.has(key));
@@ -2612,6 +2758,7 @@ function layerMainOptionsMarkup(layerId) {
               <option value="${MUNICIPALITY_DISPLAY_MODES.BIVARIATE}"${mode === MUNICIPALITY_DISPLAY_MODES.BIVARIATE ? " selected" : ""}>Bivariate Class</option>
               <option value="${MUNICIPALITY_DISPLAY_MODES.MATERIAL}"${mode === MUNICIPALITY_DISPLAY_MODES.MATERIAL ? " selected" : ""}>Building Material Zone</option>
               <option value="${MUNICIPALITY_DISPLAY_MODES.HEARTH}"${mode === MUNICIPALITY_DISPLAY_MODES.HEARTH ? " selected" : ""}>Hearth System Zone</option>
+              <option value="${MUNICIPALITY_DISPLAY_MODES.MATERIAL_HEARTH}"${mode === MUNICIPALITY_DISPLAY_MODES.MATERIAL_HEARTH ? " selected" : ""}>Material + Hearth Groups</option>
             </select>
           </label>
           <div class="field-option-toolbar">
@@ -2780,7 +2927,7 @@ function exceptionalFlowInfoMarkup() {
   return `
     <div class="climate-risk-info">
       <p>Exceptional places are selected in four stages.</p>
-      <p><strong>Stage 1:</strong> Municipality Featured Filter identifies exceptional municipalities from temperature and old-building thresholds.</p>
+      <p><strong>Stage 1:</strong> Bivariate Class identifies exceptional municipalities from temperature and old-building thresholds.</p>
       <p><strong>Stage 2:</strong> If selected, material groups are reduced to the top 3 per group by Stage 1 severity.</p>
       <p><strong>Stage 3:</strong> If selected, hearth groups are reduced to the top 3 per group by Stage 1 severity.</p>
       <p><strong>Stage 4:</strong> Climate prioritization ranks each remaining hearth group separately and keeps the top share within each hearth group.</p>
@@ -3117,6 +3264,11 @@ function renderLayerStacks() {
   if (hearthZoneScrollNode) {
     state.hearthZoneScrollTop = hearthZoneScrollNode.scrollTop;
   }
+  [...el.hoverPillRow.querySelectorAll("[data-layer-legend]")].forEach((node) => {
+    const layerId = String(node.dataset.layerLegend || "").trim();
+    if (!layerId) return;
+    state.layerLegendScrollTop[layerId] = Number(node.scrollTop || 0);
+  });
 
   [...el.hoverPillRow.querySelectorAll("details[data-layer][data-stack-role]")].forEach((node) => {
     const layerId = node.dataset.layer;
@@ -3214,7 +3366,9 @@ function renderLayerStacks() {
             ? "Bivariate Class Legend"
             : (municipalityMode === MUNICIPALITY_DISPLAY_MODES.MATERIAL
               ? "Building Material Zone Legend"
-              : "Hearth System Zone Legend"))
+              : (municipalityMode === MUNICIPALITY_DISPLAY_MODES.HEARTH
+                ? "Hearth System Zone Legend"
+                : "Material + Hearth Group Legend")))
         : `${label} Legend`;
       const legendOpen = state.layerStackOpenLegend[layerId] === true
         || (!Object.prototype.hasOwnProperty.call(state.layerStackOpenLegend, layerId) && defaultLegendOpen);
@@ -3413,6 +3567,20 @@ function renderLayerStacks() {
       legendMount.innerHTML = compactLegendMarkup(layerId);
     }
   });
+  [...el.hoverPillRow.querySelectorAll("input[data-municipality-legend-exceptional]")].forEach((node) => {
+    node.addEventListener("change", () => {
+      state.municipalityLegendExceptionalOnly = !!node.checked;
+      renderLayerStacks();
+    });
+  });
+  visibleLayers.forEach((layerId) => {
+    const legendMount = el.hoverPillRow.querySelector(`[data-layer-legend="${layerId}"]`);
+    if (!legendMount) return;
+    const previousTop = Number(state.layerLegendScrollTop[layerId] || 0);
+    if (previousTop > 0) {
+      legendMount.scrollTop = previousTop;
+    }
+  });
 
   [...el.hoverPillRow.querySelectorAll("input[data-canton-color-mode]")].forEach((node) => {
     node.addEventListener("change", () => {
@@ -3458,11 +3626,16 @@ function muniStyle(feature) {
   const biClass = String(rec?.bi_class || "");
   const mode = normalizeMunicipalityDisplayMode(state.municipalityDisplayMode);
   const isSelectedClass = biClass.length > 0 && state.legendSelectedClasses.has(biClass);
+  const materialHearthCode = materialHearthCodeFromRecord(rec || {});
+  const isSelectedMaterialHearth =
+    materialHearthCode.length > 0 && state.legendSelectedMaterialHearthGroups.has(materialHearthCode);
   let fill = rec?.bi_color || FALLBACK_FILL;
   if (mode === MUNICIPALITY_DISPLAY_MODES.MATERIAL) {
     fill = resolveMaterialZoneColor(rec?.building_material_zone_number);
   } else if (mode === MUNICIPALITY_DISPLAY_MODES.HEARTH) {
     fill = resolveHearthZoneColor(rec?.hearth_system_zone);
+  } else if (mode === MUNICIPALITY_DISPLAY_MODES.MATERIAL_HEARTH) {
+    fill = isSelectedMaterialHearth ? WHITE_FILL : resolveMaterialHearthZoneColor(rec || {});
   } else if (isSelectedClass) {
     fill = WHITE_FILL;
   }
@@ -3473,7 +3646,9 @@ function muniStyle(feature) {
     opacity: exceptional ? 1.0 : 0.9,
     fillColor: fill,
     fillOpacity:
-      (mode === MUNICIPALITY_DISPLAY_MODES.MATERIAL || mode === MUNICIPALITY_DISPLAY_MODES.HEARTH)
+      (mode === MUNICIPALITY_DISPLAY_MODES.MATERIAL
+        || mode === MUNICIPALITY_DISPLAY_MODES.HEARTH
+        || mode === MUNICIPALITY_DISPLAY_MODES.MATERIAL_HEARTH)
         ? 0.86
         : (isSelectedClass ? 1.0 : 0.82),
   };
@@ -3804,6 +3979,18 @@ function toggleLegendClass(biClass) {
   }
 }
 
+function toggleMaterialHearthLegendGroup(groupCode) {
+  const key = String(groupCode || "").trim();
+  if (!key) return;
+  if (state.legendSelectedMaterialHearthGroups.has(key)) {
+    state.legendSelectedMaterialHearthGroups.delete(key);
+  } else {
+    state.legendSelectedMaterialHearthGroups.add(key);
+  }
+  updateMunicipalityStyles();
+  renderLayerStacks();
+}
+
 function renderMaterialZoneLegend(targetNode = null) {
   const mount = targetNode;
   if (!mount) return;
@@ -3812,11 +3999,14 @@ function renderMaterialZoneLegend(targetNode = null) {
     mount.innerHTML = "<p class=\"layer-option-placeholder\">No material zone data available.</p>";
     return;
   }
+  const exceptionalOnly = !!state.municipalityLegendExceptionalOnly;
+  const coverage = exceptionalLegendCoverage();
 
   const rows = options
     .map((option) => {
       const zone = normalizeMaterialZoneNumber(option.zone_number);
       if (zone === null) return "";
+      if (exceptionalOnly && (!coverage.hasAny || !coverage.materialZones.has(zone))) return "";
       const color = resolveMaterialZoneColor(zone);
       const label = materialZoneLabel(zone);
       return `
@@ -3829,7 +4019,16 @@ function renderMaterialZoneLegend(targetNode = null) {
     .filter(Boolean)
     .join("");
 
+  if (!rows) {
+    mount.innerHTML = `
+      ${municipalityLegendExceptionalToggleMarkup()}
+      <p class="layer-option-placeholder">No legend members match current exceptional municipalities.</p>
+    `;
+    return;
+  }
+
   mount.innerHTML = `
+    ${municipalityLegendExceptionalToggleMarkup()}
     <div class="material-legend">
       ${rows}
     </div>
@@ -3845,10 +4044,13 @@ function renderHearthZoneLegend(targetNode = null) {
     mount.innerHTML = "<p class=\"layer-option-placeholder\">No hearth zone data available.</p>";
     return;
   }
+  const exceptionalOnly = !!state.municipalityLegendExceptionalOnly;
+  const coverage = exceptionalLegendCoverage();
 
   const rows = options
     .map((label) => {
       const normalized = hearthZoneLabel(label);
+      if (exceptionalOnly && (!coverage.hasAny || !coverage.hearthZones.has(normalized))) return "";
       const color = resolveHearthZoneColor(normalized);
       return `
         <div class="material-legend-row">
@@ -3859,12 +4061,110 @@ function renderHearthZoneLegend(targetNode = null) {
     })
     .join("");
 
+  if (!rows) {
+    mount.innerHTML = `
+      ${municipalityLegendExceptionalToggleMarkup()}
+      <p class="layer-option-placeholder">No legend members match current exceptional municipalities.</p>
+    `;
+    return;
+  }
+
   mount.innerHTML = `
+    ${municipalityLegendExceptionalToggleMarkup()}
     <div class="material-legend">
       ${rows}
     </div>
     <p class="legend-caption">Display colors show hearth system zones.</p>
   `;
+}
+
+function renderMaterialHearthLegend(targetNode = null) {
+  const mount = targetNode;
+  if (!mount) return;
+
+  const entries = collectMaterialHearthLegendEntries();
+  if (!entries.length) {
+    mount.innerHTML = "<p class=\"layer-option-placeholder\">No material + hearth data available.</p>";
+    return;
+  }
+  const exceptionalOnly = !!state.municipalityLegendExceptionalOnly;
+  const coverage = exceptionalLegendCoverage();
+  const filteredEntries = exceptionalOnly
+    ? entries.filter((entry) => coverage.hasAny && coverage.materialHearthCodes.has(String(entry.code || "")))
+    : entries;
+  if (!filteredEntries.length) {
+    mount.innerHTML = `
+      ${municipalityLegendExceptionalToggleMarkup()}
+      <p class="layer-option-placeholder">No legend members match current exceptional municipalities.</p>
+    `;
+    return;
+  }
+
+  const grouped = new Map();
+  filteredEntries.forEach((entry) => {
+    const zone = entry.zoneNumber;
+    const groupKey = zone === null ? "zone-unspecified" : `zone-${zone}`;
+    if (!grouped.has(groupKey)) {
+      const heading = zone === null
+        ? "Unspecified material"
+        : `${entry.materialShort} (${zone})`;
+      grouped.set(groupKey, { key: groupKey, zoneNumber: zone, heading, rows: [] });
+    }
+    grouped.get(groupKey).rows.push(entry);
+  });
+
+  const sections = [...grouped.values()]
+    .sort((a, b) => {
+      const az = a.zoneNumber === null ? Number.POSITIVE_INFINITY : Number(a.zoneNumber);
+      const bz = b.zoneNumber === null ? Number.POSITIVE_INFINITY : Number(b.zoneNumber);
+      if (az !== bz) return az - bz;
+      return String(a.heading || "").localeCompare(String(b.heading || ""));
+    })
+    .map((group) => {
+      const rows = group.rows
+        .map((entry) => {
+          const code = String(entry.code || "").trim();
+          const active = state.legendSelectedMaterialHearthGroups.has(code) ? " is-active" : "";
+          const color = resolveMaterialHearthZoneColor(code);
+          return `
+            <button
+              type="button"
+              class="material-legend-row material-legend-button material-hearth-legend-item${active}"
+              data-material-hearth-group="${escapeHtml(code)}"
+              aria-label="${escapeHtml(entry.label)} (${escapeHtml(code)}). Click to whiten matching municipalities."
+              aria-pressed="${active ? "true" : "false"}"
+              title="${escapeHtml(entry.label)} (${escapeHtml(code)}). Click to whiten matching municipalities."
+            >
+              <span class="material-legend-swatch" style="background:${escapeHtml(color)}"></span>
+              <span>${escapeHtml(entry.hearthShort)} (${escapeHtml(code)})</span>
+            </button>
+          `;
+        })
+        .join("");
+      return `
+        <section class="material-hearth-legend-group">
+          <h4>${escapeHtml(group.heading)}</h4>
+          <div class="material-hearth-legend-items">
+            ${rows}
+          </div>
+        </section>
+      `;
+    })
+    .join("");
+
+  mount.innerHTML = `
+    ${municipalityLegendExceptionalToggleMarkup()}
+    <div class="material-legend">
+      ${sections}
+    </div>
+    <p class="legend-caption">Click groups to whiten matching municipalities (visual only).</p>
+  `;
+
+  [...mount.querySelectorAll("button[data-material-hearth-group]")].forEach((btn) => {
+    btn.addEventListener("click", () => {
+      toggleMaterialHearthLegendGroup(btn.dataset.materialHearthGroup);
+    });
+  });
 }
 
 function renderMunicipalityLegend(targetNode = null) {
@@ -3877,19 +4177,36 @@ function renderMunicipalityLegend(targetNode = null) {
     renderHearthZoneLegend(targetNode);
     return;
   }
+  if (mode === MUNICIPALITY_DISPLAY_MODES.MATERIAL_HEARTH) {
+    renderMaterialHearthLegend(targetNode);
+    return;
+  }
   renderLegend(targetNode);
 }
 
 function renderLegend(targetNode = null) {
   const mount = targetNode;
   if (!mount) return;
+  const exceptionalOnly = !!state.municipalityLegendExceptionalOnly;
+  const coverage = exceptionalLegendCoverage();
 
   const classColor = {};
   Object.values(state.records).forEach((r) => {
     if (r.bi_class && r.bi_color) classColor[r.bi_class] = r.bi_color;
   });
+  const visibleClasses = DIAMOND_LEGEND_ORDER.filter((biClass) => {
+    if (!exceptionalOnly) return true;
+    return coverage.hasAny && coverage.biClasses.has(biClass);
+  });
+  if (!visibleClasses.length) {
+    mount.innerHTML = `
+      ${municipalityLegendExceptionalToggleMarkup()}
+      <p class="layer-option-placeholder">No legend members match current exceptional municipalities.</p>
+    `;
+    return;
+  }
 
-  const cellsHtml = DIAMOND_LEGEND_ORDER
+  const cellsHtml = visibleClasses
     .map((biClass) => {
       const [gridRow, gridCol] = DIAMOND_LEGEND_COORDS[biClass] || [3, 3];
       const color = classColor[biClass] || FALLBACK_FILL;
@@ -3912,6 +4229,7 @@ function renderLegend(targetNode = null) {
     .join("");
 
   mount.innerHTML = `
+    ${municipalityLegendExceptionalToggleMarkup()}
     <div class="diamond-legend">
       <div class="diamond-corner diamond-top">High Temperature<br>High Buildings</div>
       <div class="diamond-corner diamond-right">High Temperature<br>Low Buildings</div>
@@ -4371,6 +4689,11 @@ async function recompute(isInitial = false, rethrowOnError = false) {
     });
 
     state.records = data.records || {};
+    buildMaterialHearthZoneColorMap();
+    const validMaterialHearthCodes = new Set(Object.keys(state.materialHearthZoneColorMap));
+    state.legendSelectedMaterialHearthGroups = new Set(
+      [...state.legendSelectedMaterialHearthGroups].filter((code) => validMaterialHearthCodes.has(code)),
+    );
     state.exceptional = new Set((data.exceptional_ids || []).map(String));
     state.exceptionalStage1 = new Set((data.stage1_exceptional_ids || []).map(String));
     state.climateStageStatus = data.climate_stage_status || {};
@@ -4518,7 +4841,18 @@ async function boot() {
     el.kTemp.value = String(defaults.k_temp ?? 1.0);
     el.kOld.value = String(defaults.k_old ?? 1.0);
     state.climateIndicatorOptions = Array.isArray(options.climate_indicator_options) ? options.climate_indicator_options : [];
-    state.selectedClimateIndicators = new Set((defaults.climate_indicator_keys || []).map(String));
+    const availableClimateKeys = new Set(
+      (state.climateIndicatorOptions || [])
+        .map((opt) => String(opt?.key || "").trim())
+        .filter(Boolean),
+    );
+    const preferredDefaults = CLIMATE_DEFAULT_INDICATOR_KEYS.filter((key) => availableClimateKeys.has(key));
+    const bootstrapDefaults = (defaults.climate_indicator_keys || [])
+      .map((key) => String(key || "").trim())
+      .filter((key) => availableClimateKeys.has(key));
+    state.selectedClimateIndicators = new Set(
+      preferredDefaults.length ? preferredDefaults : bootstrapDefaults,
+    );
     state.climateTopSharePct = normalizeClimateTopShare(defaults.climate_top_share_pct ?? 25);
     state.municipalityDisplayMode = normalizeMunicipalityDisplayMode(defaults.municipality_display_mode);
     state.buildingMaterialZoneOptions = Array.isArray(options.building_material_zone_options)
@@ -4550,6 +4884,7 @@ async function boot() {
     state.applyClimatePriority = defaults.apply_climate_priority !== false;
     buildMaterialZoneColorMap();
     buildHearthZoneColorMap();
+    buildMaterialHearthZoneColorMap();
 
     if (Array.isArray(options.temperature_methods) && options.temperature_methods.length) {
       el.tempMethod.innerHTML = options.temperature_methods

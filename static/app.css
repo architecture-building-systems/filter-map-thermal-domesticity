@@ -148,7 +148,7 @@ body {
   overflow-x: auto;
   overflow-y: visible;
   padding: 0 0.1rem 0.3rem;
-  pointer-events: auto;
+  pointer-events: none;
   scrollbar-gutter: stable both-edges;
 }
 
@@ -646,6 +646,20 @@ body {
   color: var(--text);
 }
 
+.legend-filter-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0 0 0.45rem;
+  font-size: 0.72rem;
+  line-height: 1.2;
+  color: var(--text);
+}
+
+.legend-filter-toggle input[type="checkbox"] {
+  margin: 0;
+}
+
 .material-legend {
   display: grid;
   gap: 0.34rem;
@@ -659,11 +673,60 @@ body {
   line-height: 1.25;
 }
 
+.material-legend-button {
+  width: 100%;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 0.24rem 0.32rem;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.material-legend-button:hover {
+  border-color: color-mix(in srgb, var(--line) 75%, #000 25%);
+  background: color-mix(in srgb, var(--pill) 88%, #fff 12%);
+}
+
+.material-legend-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.material-legend-button.is-active {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--pill) 82%, var(--accent) 18%);
+}
+
 .material-legend-swatch {
   width: 0.9rem;
   height: 0.9rem;
   border-radius: 2px;
   border: 1px solid color-mix(in srgb, var(--line) 70%, #000 30%);
+}
+
+.material-hearth-legend-group {
+  display: grid;
+  gap: 0.22rem;
+}
+
+.material-hearth-legend-group h4 {
+  margin: 0;
+  font-size: 0.72rem;
+  line-height: 1.2;
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.material-hearth-legend-items {
+  display: grid;
+  gap: 0.22rem;
+  padding-left: 0.18rem;
+}
+
+.material-hearth-legend-item {
+  padding-left: 0.28rem;
 }
 
 .cantons-legend {
