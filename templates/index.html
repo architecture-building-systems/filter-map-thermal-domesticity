@@ -10,7 +10,7 @@
   <link href="https://fonts.googleapis.com/css2?family=Comfortaa:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-  <link rel="stylesheet" href="{{ url_for('static', filename='app.css', v='20260311g') }}" />
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css', v='20260315b') }}" />
 </head>
 <body>
   <div id="app-loader" class="is-visible" role="status" aria-live="polite" aria-label="Application loading">
@@ -108,6 +108,14 @@
     </section>
   </aside>
 
+  <section id="compare-launcher-wrap" aria-label="Municipality comparison">
+    <button id="compare-launcher" type="button" aria-label="Open municipality comparison">
+      ≈
+      <span id="compare-launcher-count" class="hidden">0</span>
+    </button>
+    <div id="compare-launcher-popover" class="compare-launcher-popover hidden" aria-live="polite"></div>
+  </section>
+
   <section id="municipality-modal" class="municipality-modal hidden" aria-hidden="true">
     <div class="municipality-modal-backdrop" data-muni-modal-close></div>
     <div
@@ -124,9 +132,14 @@
           <h2 id="municipality-modal-title">Municipality Profile</h2>
           <p id="municipality-modal-meta">Loading municipality profile ...</p>
         </div>
-        <button id="municipality-modal-close" class="municipality-modal-close" type="button" aria-label="Close municipality profile">
-          ×
-        </button>
+        <div class="municipality-modal-header-actions">
+          <button id="municipality-modal-compare" class="field-option-action" type="button" aria-label="Add municipality to compare">
+            Add to compare
+          </button>
+          <button id="municipality-modal-close" class="municipality-modal-close" type="button" aria-label="Close municipality profile">
+            ×
+          </button>
+        </div>
       </header>
       <div id="municipality-modal-body" class="municipality-modal-body">
         <aside class="municipality-modal-left" aria-label="Municipality geometry">
@@ -142,8 +155,39 @@
     </div>
   </section>
 
+  <section id="compare-modal" class="compare-modal hidden" aria-hidden="true">
+    <div class="compare-modal-backdrop" data-compare-close></div>
+    <div
+      id="compare-modal-panel"
+      class="compare-modal-panel"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="compare-modal-title"
+      tabindex="-1"
+    >
+      <header class="compare-modal-header">
+        <div class="compare-modal-heading">
+          <h2 id="compare-modal-title">Municipality Comparison</h2>
+          <p id="compare-modal-meta">Compare up to 4 municipalities.</p>
+        </div>
+        <div class="municipality-modal-header-actions">
+          <button id="compare-modal-report" class="field-option-action" type="button" aria-label="Download municipality comparison report">
+            Download comparison report
+          </button>
+          <button id="compare-modal-close" class="municipality-modal-close" type="button" aria-label="Close municipality comparison">
+            ×
+          </button>
+        </div>
+      </header>
+      <nav id="compare-modal-sections" class="compare-modal-sections" role="tablist" aria-label="Comparison sections"></nav>
+      <div id="compare-modal-state" class="compare-modal-state hidden"></div>
+      <section id="compare-modal-selected" class="compare-modal-selected"></section>
+      <section id="compare-modal-content" class="compare-modal-content"></section>
+    </div>
+  </section>
+
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
-  <script src="{{ url_for('static', filename='app.js', v='20260311g') }}"></script>
+  <script src="{{ url_for('static', filename='app.js', v='20260315b') }}"></script>
 </body>
 </html>

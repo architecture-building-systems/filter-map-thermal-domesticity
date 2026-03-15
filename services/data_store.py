@@ -118,6 +118,8 @@ class DataStore:
         self.building_material_zone_options: list[dict[str, str | int]] = []
         self.hearth_system_zone_options: list[dict[str, str]] = []
         self.hearth_system_zone_values: set[str] = set()
+        self.material_hearth_zone_options: list[dict[str, str]] = []
+        self.material_hearth_zone_values: set[str] = set()
         self.temperature_cache: dict[tuple[str, str, bool], dict[str, float]] = {}
         self.heating_records: dict[str, HeatingAgeRecord] = {}
         self.heating_codes: set[str] = set()
@@ -177,6 +179,12 @@ class DataStore:
             str(item.get("zone_label", "")).strip()
             for item in self.hearth_system_zone_options
             if str(item.get("zone_label", "")).strip()
+        }
+        self.material_hearth_zone_options = self._build_material_hearth_zone_options(muni_gdf)
+        self.material_hearth_zone_values = {
+            str(item.get("zone_code", "")).strip()
+            for item in self.material_hearth_zone_options
+            if str(item.get("zone_code", "")).strip()
         }
 
         self._prepare_label_raster(muni_gdf)
@@ -280,6 +288,26 @@ class DataStore:
 
         out.sort(key=lambda value: value.lower())
         return [{"zone_label": str(label)} for label in out]
+
+    def _build_material_hearth_zone_options(self, gdf: gpd.GeoDataFrame) -> list[dict[str, str]]:
+        seen: set[str] = set()
+        out: list[str] = []
+        for _, row in gdf.iterrows():
+            code = _normalize_label(row.get("material+hearth_zone"))
+            if not code:
+                zone = _safe_int(row.get("building_material_zone_number"), None)
+                hearth_code = _normalize_label(row.get("hearth_system_zone_number")).upper()
+                if len(hearth_code) != 1 or not hearth_code.isalpha():
+                    hearth_code = "U"
+                left = str(zone) if zone is not None else "U"
+                code = f"{left}_{hearth_code}"
+            if not code or code in seen:
+                continue
+            seen.add(code)
+            out.append(code)
+
+        out.sort(key=lambda value: value.lower())
+        return [{"zone_code": str(code)} for code in out]
 
     def _profile_numeric_columns(self, gdf: gpd.GeoDataFrame) -> list[str]:
         cols: list[str] = []
@@ -1378,6 +1406,7 @@ class DataStore:
                 "climate_indicator_options": self.climate_indicator_options,
                 "building_material_zone_options": self.building_material_zone_options,
                 "hearth_system_zone_options": self.hearth_system_zone_options,
+                "material_hearth_zone_options": self.material_hearth_zone_options,
                 "defaults": {
                     "season": "annual",
                     "temp_method": "mean-range",
@@ -1388,11 +1417,14 @@ class DataStore:
                     "climate_indicator_keys": self.default_climate_indicator_keys,
                     "climate_top_share_pct": 25,
                     "municipality_display_mode": "bivariate",
+                    "selected_material_hearth_zones": [],
+                    "apply_material_hearth_filter": True,
+                    "apply_climate_priority": True,
+                    # Backward compatibility defaults (kept for one transition cycle).
                     "selected_building_material_zone_numbers": [],
                     "selected_hearth_system_zones": [],
                     "apply_material_filter": True,
-                    "apply_hearth_filter": True,
-                    "apply_climate_priority": True,
+                    "apply_hearth_filter": False,
                     "auto_update": True,
                     "layer_order": [
                         "national_border",

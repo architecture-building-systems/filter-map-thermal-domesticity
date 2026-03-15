@@ -23,21 +23,31 @@ const state = {
   municipalityModalMapReady: false,
   municipalityModalMapGeometryLayer: null,
   municipalityModalMapFutureLayer: null,
+  compareBfsOrder: [],
+  compareModalOpen: false,
+  compareModalActiveSection: "metrics",
+  compareModalSnapshotPanel: "swiss_ratio",
+  compareModalReturnFocusEl: null,
+  compareProfileCache: {},
+  compareProfileFetchInFlight: {},
+  compareWeatherCache: {},
+  compareWeatherFetchInFlight: {},
+  compareWeatherErrorByBfs: {},
+  compareChartIds: [],
+  compareLauncherClickTimer: null,
   municipalityDisplayMode: "bivariate",
   buildingMaterialZoneOptions: [],
-  selectedBuildingMaterialZones: new Set(),
+  materialHearthZoneOptions: [],
+  selectedMaterialHearthZones: new Set(),
   hearthSystemZoneOptions: [],
-  selectedHearthSystemZones: new Set(),
   materialZoneColorMap: {},
   hearthZoneColorMap: {},
   materialHearthZoneColorMap: {},
-  applyMaterialFilter: true,
-  applyHearthFilter: true,
+  applyMaterialHearthFilter: true,
   applyClimatePriority: true,
   climateIndicatorScrollTop: 0,
   municipalityOptionsScrollTop: 0,
-  materialZoneScrollTop: 0,
-  hearthZoneScrollTop: 0,
+  materialHearthZoneScrollTop: 0,
   analysisStackOpenClimateMain: false,
   analysisStackOpenClimateLegend: false,
   analysisStackOpenExceptional: false,
@@ -295,6 +305,33 @@ const CLIMATE_DEFAULT_INDICATOR_KEYS = [
   "TropNights_change_gwl3.0",
   "BIO03_change_gwl3.0",
 ];
+const COMPARE_MAX_MUNICIPALITIES = 4;
+const COMPARE_COLOURS = [
+  "#4c78a8",
+  "#f58518",
+  "#54a24b",
+  "#e45756",
+];
+const COMPARE_SECTIONS = [
+  { id: "metrics", label: "Core Metrics" },
+  { id: "snapshot", label: "Snapshot" },
+  { id: "weather", label: "Weather Summary" },
+];
+const COMPARE_SNAPSHOT_CORE_PANEL_IDS = [
+  "swiss_ratio",
+  "age_distribution",
+  "construction_period",
+  "heat_source",
+  "employment_by_sector",
+];
+const COMPARE_WEATHER_METRICS = [
+  { key: "tempMean", label: "Monthly mean temperature (°C)", digits: 2 },
+  { key: "tempMin", label: "Monthly min temperature (°C)", digits: 2 },
+  { key: "tempMax", label: "Monthly max temperature (°C)", digits: 2 },
+  { key: "rhMedian", label: "Monthly median RH (%)", digits: 1 },
+  { key: "ghiTotal", label: "Monthly total GHI (W/m²-hour proxy)", digits: 0 },
+];
+const MONTH_LABELS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
 const ISOS_FALLBACK_LAYER_PALETTE = [
   "#4c78a8",
@@ -392,6 +429,7 @@ const el = {
   municipalityModal: document.getElementById("municipality-modal"),
   municipalityModalPanel: document.getElementById("municipality-modal-panel"),
   municipalityModalClose: document.getElementById("municipality-modal-close"),
+  municipalityModalCompare: document.getElementById("municipality-modal-compare"),
   municipalityModalTitle: document.getElementById("municipality-modal-title"),
   municipalityModalMeta: document.getElementById("municipality-modal-meta"),
   municipalityModalTabs: document.getElementById("municipality-modal-tabs"),
@@ -399,11 +437,28 @@ const el = {
   municipalityModalContent: document.getElementById("municipality-modal-content"),
   municipalityModalMap: document.getElementById("municipality-modal-map"),
   municipalityModalGeochips: document.getElementById("municipality-modal-geochips"),
+  compareLauncherWrap: document.getElementById("compare-launcher-wrap"),
+  compareLauncher: document.getElementById("compare-launcher"),
+  compareLauncherCount: document.getElementById("compare-launcher-count"),
+  compareLauncherPopover: document.getElementById("compare-launcher-popover"),
+  compareModal: document.getElementById("compare-modal"),
+  compareModalPanel: document.getElementById("compare-modal-panel"),
+  compareModalReport: document.getElementById("compare-modal-report"),
+  compareModalClose: document.getElementById("compare-modal-close"),
+  compareModalSections: document.getElementById("compare-modal-sections"),
+  compareModalState: document.getElementById("compare-modal-state"),
+  compareModalSelected: document.getElementById("compare-modal-selected"),
+  compareModalContent: document.getElementById("compare-modal-content"),
 };
 
 function setStatus(msg) {
   const warning = state.healthWarning ? ` | ${state.healthWarning}` : "";
   el.status.textContent = `${msg}${warning}`;
+}
+
+function syncBodyModalClass() {
+  const modalOpen = !!(state.municipalityModalOpen || state.compareModalOpen);
+  document.body.classList.toggle("modal-open", modalOpen);
 }
 
 function setLoaderStage(stage, detail = "") {
@@ -462,10 +517,19 @@ function _uniqueNumbers(values = []) {
   return out;
 }
 
-function selectedMaterialZoneNumbersArray() {
-  return [...state.selectedBuildingMaterialZones]
-    .map((v) => normalizeMaterialZoneNumber(v))
-    .filter((v) => v !== null);
+function selectedMaterialHearthZonesArray() {
+  return _uniqueLabels([...state.selectedMaterialHearthZones]);
+}
+
+function materialHearthOptionLabel(zoneCode) {
+  const code = String(zoneCode || "").trim();
+  if (!code) return "Unspecified";
+  const [leftRaw, rightRaw] = code.split("_");
+  const zoneNumber = normalizeMaterialZoneNumber(leftRaw);
+  const hearthCode = String(rightRaw || "").trim().toUpperCase();
+  const materialShort = summarizeMaterialLabel(zoneNumber, zoneNumber === null ? "" : `Zone ${zoneNumber}`);
+  const hearthShort = summarizeHearthLabel("", hearthCode);
+  return `${materialShort} · ${hearthShort} (${code})`;
 }
 
 function _uniqueLabels(values = []) {
@@ -479,10 +543,6 @@ function _uniqueLabels(values = []) {
     out.push(label);
   });
   return out;
-}
-
-function selectedHearthSystemZonesArray() {
-  return _uniqueLabels([...state.selectedHearthSystemZones]);
 }
 
 function overlayGeojson(layerId) {
@@ -577,6 +637,49 @@ function buildMunicipalityKvMarkup(rows = []) {
     `)
     .join("");
   return `<dl class="municipality-kv">${html}</dl>`;
+}
+
+function compareMunicipalityName(bfs) {
+  const key = normalizeBfsId(bfs);
+  if (!key) return "";
+  const profile = state.compareProfileCache[key] || state.municipalityModalProfileCache[key];
+  if (profile?.identity?.name) return String(profile.identity.name);
+  const rec = state.records[key];
+  if (rec?.name) return String(rec.name);
+  if (rec?.NAME) return String(rec.NAME);
+  const feature = municipalityFeatureByBfs(key);
+  if (feature?.properties?.NAME) return String(feature.properties.NAME);
+  return key;
+}
+
+function compareMunicipalityCanton(bfs) {
+  const key = normalizeBfsId(bfs);
+  if (!key) return "";
+  const profile = state.compareProfileCache[key] || state.municipalityModalProfileCache[key];
+  if (profile?.identity?.canton_name) return String(profile.identity.canton_name);
+  const rec = state.records[key];
+  if (rec?.canton_name) return String(rec.canton_name);
+  return "";
+}
+
+function compareMunicipalityLabel(bfs) {
+  const name = compareMunicipalityName(bfs);
+  const canton = compareMunicipalityCanton(bfs);
+  return canton ? `${name} (${canton})` : name;
+}
+
+function compareStatusLabel(status) {
+  const key = String(status || "").trim();
+  if (key === "selected") return "Selected";
+  if (key === "filtered_out") return "Filtered out";
+  if (key === "missing") return "No climate score";
+  return "N/A";
+}
+
+function compareColourByBfs(bfs) {
+  const idx = state.compareBfsOrder.indexOf(String(bfs));
+  const safeIdx = idx < 0 ? 0 : idx;
+  return COMPARE_COLOURS[safeIdx % COMPARE_COLOURS.length];
 }
 
 function buildMunicipalityOverviewTab(profile) {
@@ -1497,6 +1600,18 @@ function renderMunicipalityModal() {
   if (el.municipalityModalMeta) {
     el.municipalityModalMeta.textContent = municipalityProfileMetaLine(profile) || "Loading profile context ...";
   }
+  if (el.municipalityModalCompare) {
+    const key = normalizeBfsId(state.municipalityModalSelectedBfs);
+    const inCompare = key && state.compareBfsOrder.includes(key);
+    const compareFull = state.compareBfsOrder.length >= COMPARE_MAX_MUNICIPALITIES;
+    const blocked = !inCompare && compareFull;
+    el.municipalityModalCompare.disabled = !!blocked;
+    el.municipalityModalCompare.textContent = inCompare ? "Remove from compare" : "Add to compare";
+    el.municipalityModalCompare.setAttribute(
+      "aria-label",
+      inCompare ? "Remove municipality from comparison" : "Add municipality to comparison",
+    );
+  }
   if (el.municipalityModalTabs) {
     el.municipalityModalTabs.innerHTML = MUNICIPALITY_MODAL_TABS
       .map((tab) => {
@@ -1588,7 +1703,7 @@ async function openMunicipalityModal(bfs, preferredTab = "overview") {
   state.municipalityModalActiveTab = municipalityProfileTabIsValid(preferredTab) ? preferredTab : "overview";
   state.municipalityModalProfileError = "";
   setMunicipalityQueryParam(key);
-  document.body.classList.add("modal-open");
+  syncBodyModalClass();
 
   const cached = state.municipalityModalProfileCache[key];
   if (cached) {
@@ -1633,7 +1748,7 @@ function closeMunicipalityModal() {
   state.municipalityModalSelectedBfs = null;
   renderMunicipalityModal();
   setMunicipalityQueryParam(null);
-  document.body.classList.remove("modal-open");
+  syncBodyModalClass();
   if (state.municipalityModalReturnFocusEl && typeof state.municipalityModalReturnFocusEl.focus === "function") {
     state.municipalityModalReturnFocusEl.focus();
   }
@@ -1700,6 +1815,1418 @@ function wireMunicipalityModalEvents() {
     }
     if (event.key === "Tab") {
       const focusable = municipalityModalFocusables();
+      if (!focusable.length) {
+        event.preventDefault();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+  });
+}
+
+function compareModalFocusables() {
+  if (!el.compareModalPanel) return [];
+  return [...el.compareModalPanel.querySelectorAll(
+    "button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])",
+  )].filter((node) => node.offsetParent !== null);
+}
+
+function compareModalSectionIsValid(sectionId) {
+  return COMPARE_SECTIONS.some((section) => section.id === sectionId);
+}
+
+function destroyCompareCharts() {
+  (state.compareChartIds || []).forEach((chartId) => destroyChart(chartId));
+  state.compareChartIds = [];
+}
+
+function clearCompareSelection() {
+  state.compareBfsOrder = [];
+  renderCompareLauncher();
+  if (state.compareModalOpen) {
+    renderCompareModal();
+  }
+  if (state.municipalityModalOpen) {
+    renderMunicipalityModal();
+  }
+  setStatus("Comparison selection cleared.");
+}
+
+function toggleCompareMunicipality(bfs) {
+  const key = normalizeBfsId(bfs);
+  if (!key) return;
+  const existing = state.compareBfsOrder.indexOf(key);
+  if (existing >= 0) {
+    state.compareBfsOrder.splice(existing, 1);
+  } else if (state.compareBfsOrder.length >= COMPARE_MAX_MUNICIPALITIES) {
+    setStatus(`Maximum ${COMPARE_MAX_MUNICIPALITIES} municipalities in comparison.`);
+    return;
+  } else {
+    state.compareBfsOrder.push(key);
+    prefetchCompareMunicipalityData(key);
+  }
+  renderCompareLauncher();
+  if (state.compareModalOpen) renderCompareModal();
+  if (state.municipalityModalOpen) renderMunicipalityModal();
+}
+
+function renderCompareLauncher() {
+  if (!el.compareLauncher) return;
+  const count = state.compareBfsOrder.length;
+  if (el.compareLauncherCount) {
+    el.compareLauncherCount.textContent = String(count);
+    el.compareLauncherCount.classList.toggle("hidden", count === 0);
+  }
+  if (el.compareLauncherPopover) {
+    if (count === 0) {
+      el.compareLauncherPopover.classList.add("hidden");
+      el.compareLauncherPopover.innerHTML = "";
+    } else {
+      const items = state.compareBfsOrder
+        .map((bfs) => `<li>${escapeHtml(compareMunicipalityLabel(bfs))}</li>`)
+        .join("");
+      el.compareLauncherPopover.innerHTML = `<ul>${items}</ul>`;
+      el.compareLauncherPopover.classList.remove("hidden");
+    }
+  }
+}
+
+async function ensureCompareProfileLoaded(bfs) {
+  const key = normalizeBfsId(bfs);
+  if (!key) throw new Error("Invalid municipality BFS.");
+  if (state.compareProfileCache[key]) return state.compareProfileCache[key];
+  if (state.compareProfileFetchInFlight[key]) return state.compareProfileFetchInFlight[key];
+  const promise = ensureMunicipalityProfileLoaded(key)
+    .then((profile) => {
+      state.compareProfileCache[key] = profile;
+      return profile;
+    })
+    .finally(() => {
+      state.compareProfileFetchInFlight[key] = null;
+      if (state.compareModalOpen) renderCompareModal();
+      if (state.municipalityModalOpen) renderMunicipalityModal();
+      renderCompareLauncher();
+    });
+  state.compareProfileFetchInFlight[key] = promise;
+  return promise;
+}
+
+async function ensureCompareWeatherLoaded(bfs) {
+  const key = normalizeBfsId(bfs);
+  if (!key) throw new Error("Invalid municipality BFS.");
+  if (state.compareWeatherCache[key]) return state.compareWeatherCache[key];
+  if (state.compareWeatherFetchInFlight[key]) return state.compareWeatherFetchInFlight[key];
+  const promise = fetchJson(`/api/municipality/${encodeURIComponent(key)}/weather`)
+    .then((data) => {
+      state.compareWeatherCache[key] = data;
+      state.compareWeatherErrorByBfs[key] = "";
+      return data;
+    })
+    .catch((err) => {
+      state.compareWeatherErrorByBfs[key] = String(err?.message || "Weather data unavailable");
+      throw err;
+    })
+    .finally(() => {
+      state.compareWeatherFetchInFlight[key] = null;
+      if (state.compareModalOpen) renderCompareModal();
+    });
+  state.compareWeatherFetchInFlight[key] = promise;
+  return promise;
+}
+
+function prefetchCompareMunicipalityData(bfs) {
+  const key = normalizeBfsId(bfs);
+  if (!key) return;
+  Promise.allSettled([
+    ensureCompareProfileLoaded(key),
+    ensureCompareWeatherLoaded(key),
+  ]).catch(() => {});
+}
+
+function medianOf(values = []) {
+  if (!Array.isArray(values) || !values.length) return null;
+  const sorted = values
+    .map((v) => Number(v))
+    .filter((v) => Number.isFinite(v))
+    .sort((a, b) => a - b);
+  if (!sorted.length) return null;
+  const mid = Math.floor(sorted.length / 2);
+  if (sorted.length % 2 === 0) {
+    return (sorted[mid - 1] + sorted[mid]) / 2;
+  }
+  return sorted[mid];
+}
+
+function flattenMonthlyScatter(month = null) {
+  if (!month || !Array.isArray(month.scatter)) return [];
+  const out = [];
+  month.scatter.forEach((hourValues) => {
+    if (!Array.isArray(hourValues)) return;
+    hourValues.forEach((value) => {
+      const n = Number(value);
+      if (Number.isFinite(n)) out.push(n);
+    });
+  });
+  if (!out.length && Array.isArray(month.medians)) {
+    month.medians.forEach((value) => {
+      const n = Number(value);
+      if (Number.isFinite(n)) out.push(n);
+    });
+  }
+  return out;
+}
+
+function weatherSummarySeries(weatherData = null) {
+  const tempMonthly = weatherData?.variables?.temp_air?.monthly || [];
+  const rhMonthly = weatherData?.variables?.relative_humidity?.monthly || [];
+  const ghiMonthly = weatherData?.variables?.ghi?.monthly || [];
+  const tempMean = [];
+  const tempMin = [];
+  const tempMax = [];
+  const rhMedian = [];
+  const ghiTotal = [];
+
+  for (let i = 0; i < 12; i += 1) {
+    const tempVals = flattenMonthlyScatter(tempMonthly[i]);
+    const rhVals = flattenMonthlyScatter(rhMonthly[i]);
+    const ghiVals = flattenMonthlyScatter(ghiMonthly[i]);
+
+    if (tempVals.length) {
+      const sum = tempVals.reduce((acc, v) => acc + v, 0);
+      tempMean.push(sum / tempVals.length);
+      tempMin.push(Math.min(...tempVals));
+      tempMax.push(Math.max(...tempVals));
+    } else {
+      tempMean.push(null);
+      tempMin.push(null);
+      tempMax.push(null);
+    }
+
+    rhMedian.push(rhVals.length ? medianOf(rhVals) : null);
+    ghiTotal.push(ghiVals.length ? ghiVals.reduce((acc, v) => acc + v, 0) : null);
+  }
+
+  return { tempMean, tempMin, tempMax, rhMedian, ghiTotal };
+}
+
+function renderCompareGroupedBarChart(canvasId, labels = [], datasets = [], yAxisLabel = "") {
+  destroyChart(canvasId);
+  const canvas = document.getElementById(canvasId);
+  if (!canvas || !window.Chart) return;
+  _chartInstances[canvasId] = new Chart(canvas, {
+    type: "bar",
+    data: { labels, datasets },
+    options: {
+      maintainAspectRatio: false,
+      responsive: true,
+      animation: false,
+      plugins: {
+        legend: {
+          position: "top",
+          labels: { font: { family: _chartFontFamily, size: 11 } },
+        },
+        tooltip: {
+          bodyFont: { family: _chartFontFamily },
+          titleFont: { family: _chartFontFamily },
+        },
+      },
+      scales: {
+        x: {
+          grid: { color: "#efefef" },
+          ticks: { font: { family: _chartFontFamily, size: 10 } },
+        },
+        y: {
+          grid: { color: "#efefef" },
+          ticks: { font: { family: _chartFontFamily, size: 10 } },
+          title: yAxisLabel
+            ? {
+                display: true,
+                text: yAxisLabel,
+                font: { family: _chartFontFamily, size: 10 },
+              }
+            : { display: false },
+        },
+      },
+    },
+  });
+  state.compareChartIds.push(canvasId);
+}
+
+function snapshotPanelSeries(panelId, snapshotData = null) {
+  const block = snapshotData?.[panelId];
+  if (!block) return null;
+  if (panelId === "swiss_ratio") {
+    const swiss = Number(block.swiss);
+    const nonSwiss = Number(block.non_swiss);
+    const ratio = (Number.isFinite(swiss) && Number.isFinite(nonSwiss) && nonSwiss > 0)
+      ? (swiss / nonSwiss)
+      : null;
+    return { kind: "scalar", label: "Swiss / Non-Swiss ratio", value: ratio, raw: block.ratio ?? null };
+  }
+
+  if (panelId === "employment_by_sector" && Array.isArray(block.sectors)) {
+    const male = Array.isArray(block.male) ? block.male : [];
+    const female = Array.isArray(block.female) ? block.female : [];
+    const labels = block.sectors.map((s) => String(s));
+    const values = labels.map((_, idx) => {
+      const m = Number(male[idx]);
+      const f = Number(female[idx]);
+      return (Number.isFinite(m) ? m : 0) + (Number.isFinite(f) ? f : 0);
+    });
+    return { kind: "series", labels, values };
+  }
+
+  if (panelId === "age_distribution" && Array.isArray(block.cohorts)) {
+    const male = Array.isArray(block.male) ? block.male : [];
+    const female = Array.isArray(block.female) ? block.female : [];
+    const labels = block.cohorts.map((s) => String(s));
+    const values = labels.map((_, idx) => {
+      const m = Number(male[idx]);
+      const f = Number(female[idx]);
+      return (Number.isFinite(m) ? m : 0) + (Number.isFinite(f) ? f : 0);
+    });
+    return { kind: "series", labels, values };
+  }
+
+  if (Array.isArray(block.items) && block.items.length) {
+    const labels = block.items.map((item) => String(item.label || item.code || "Item"));
+    const values = block.items.map((item) => {
+      const v = Number(item.value);
+      if (Number.isFinite(v)) return v;
+      const share = Number(item.share_pct);
+      return Number.isFinite(share) ? share : 0;
+    });
+    return { kind: "series", labels, values };
+  }
+  return null;
+}
+
+function compareProfileForBfs(bfs) {
+  const key = normalizeBfsId(bfs);
+  if (!key) return null;
+  return state.compareProfileCache[key] || state.municipalityModalProfileCache[key] || null;
+}
+
+function compareSnapshotForBfs(bfs) {
+  return compareProfileForBfs(bfs)?.snapshot || null;
+}
+
+function snapshotPanelTitle(panelId) {
+  return SNAPSHOT_PANELS.find((panel) => panel.id === panelId)?.title || panelId;
+}
+
+function formatCompareNumber(value, digits = 2) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "N/A";
+  return n.toFixed(digits);
+}
+
+function formatComparePercent(value, digits = 1) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "N/A";
+  return `${n.toFixed(digits)}%`;
+}
+
+function normaliseSnapshotItemsFromBlock(block = null) {
+  if (!block || typeof block !== "object") return [];
+  let items = [];
+  if (Array.isArray(block.items) && block.items.length) {
+    items = block.items.map((item) => ({
+      label: String(item?.label || item?.code || "Unknown"),
+      value: Number(item?.value),
+      share: Number(item?.share_pct),
+    }));
+  } else if (Array.isArray(block.sectors)) {
+    const male = Array.isArray(block.male) ? block.male : [];
+    const female = Array.isArray(block.female) ? block.female : [];
+    items = block.sectors.map((sector, idx) => {
+      const m = Number(male[idx]);
+      const f = Number(female[idx]);
+      const value = (Number.isFinite(m) ? m : 0) + (Number.isFinite(f) ? f : 0);
+      return { label: String(sector || `Sector ${idx + 1}`), value, share: NaN };
+    });
+  } else if (Array.isArray(block.cohorts)) {
+    const male = Array.isArray(block.male) ? block.male : [];
+    const female = Array.isArray(block.female) ? block.female : [];
+    items = block.cohorts.map((cohort, idx) => {
+      const m = Number(male[idx]);
+      const f = Number(female[idx]);
+      const value = (Number.isFinite(m) ? m : 0) + (Number.isFinite(f) ? f : 0);
+      return { label: String(cohort || `Cohort ${idx + 1}`), value, share: NaN };
+    });
+  }
+
+  const cleaned = items
+    .map((item) => ({
+      label: String(item.label || "Unknown"),
+      value: Number.isFinite(Number(item.value)) ? Number(item.value) : 0,
+      share: Number(item.share),
+    }))
+    .filter((item) => item.label);
+
+  if (!cleaned.length) return [];
+  const total = cleaned.reduce((acc, item) => acc + (Number.isFinite(item.value) ? item.value : 0), 0);
+  const out = cleaned.map((item) => {
+    const share = Number.isFinite(item.share)
+      ? item.share
+      : (total > 0 ? (100 * item.value / total) : NaN);
+    return {
+      label: item.label,
+      value: item.value,
+      share: Number.isFinite(share) ? share : 0,
+    };
+  });
+  out.sort((a, b) => (b.share - a.share) || a.label.localeCompare(b.label));
+  return out;
+}
+
+function snapshotShareMatrixForPanel(bfss = [], panelId) {
+  const categoriesSet = new Set();
+  const matrixByBfs = {};
+  const dominantByBfs = {};
+
+  bfss.forEach((bfs) => {
+    const block = compareSnapshotForBfs(bfs)?.[panelId] || null;
+    const items = normaliseSnapshotItemsFromBlock(block);
+    const map = {};
+    items.forEach((item) => {
+      const label = String(item.label || "").trim();
+      if (!label) return;
+      categoriesSet.add(label);
+      map[label] = Number(item.share) || 0;
+    });
+    matrixByBfs[bfs] = map;
+    if (items.length) {
+      dominantByBfs[bfs] = { label: items[0].label, share: items[0].share };
+    } else {
+      dominantByBfs[bfs] = { label: "N/A", share: NaN };
+    }
+  });
+
+  const categories = [...categoriesSet];
+  categories.sort((a, b) => {
+    const avgA = bfss.reduce((acc, bfs) => acc + (matrixByBfs[bfs]?.[a] || 0), 0) / Math.max(1, bfss.length);
+    const avgB = bfss.reduce((acc, bfs) => acc + (matrixByBfs[bfs]?.[b] || 0), 0) / Math.max(1, bfss.length);
+    return (avgB - avgA) || a.localeCompare(b);
+  });
+
+  return { categories, matrixByBfs, dominantByBfs };
+}
+
+function buildSwissRatioComparisonData(bfss = []) {
+  const rows = bfss.map((bfs) => {
+    const block = compareSnapshotForBfs(bfs)?.swiss_ratio || {};
+    const swiss = Number(block.swiss);
+    const nonSwiss = Number(block.non_swiss);
+    const ratio = (Number.isFinite(swiss) && Number.isFinite(nonSwiss) && nonSwiss > 0) ? (swiss / nonSwiss) : NaN;
+    return {
+      bfs,
+      label: compareMunicipalityLabel(bfs),
+      swiss: Number.isFinite(swiss) ? swiss : NaN,
+      nonSwiss: Number.isFinite(nonSwiss) ? nonSwiss : NaN,
+      ratio,
+    };
+  });
+
+  const baseline = rows.find((row) => Number.isFinite(row.ratio))?.ratio;
+  rows.forEach((row) => {
+    row.delta = Number.isFinite(row.ratio) && Number.isFinite(baseline) ? row.ratio - baseline : NaN;
+  });
+
+  const valid = rows.filter((row) => Number.isFinite(row.ratio));
+  const findings = [];
+  if (valid.length) {
+    const highest = [...valid].sort((a, b) => (b.ratio - a.ratio) || a.bfs.localeCompare(b.bfs))[0];
+    findings.push(`Highest Swiss/non-Swiss ratio: ${highest.label} (${highest.ratio.toFixed(2)}).`);
+    if (valid.length > 1) {
+      const min = [...valid].sort((a, b) => (a.ratio - b.ratio) || a.bfs.localeCompare(b.bfs))[0];
+      findings.push(`Ratio spread across compared municipalities: ${(highest.ratio - min.ratio).toFixed(2)}.`);
+    }
+  } else {
+    findings.push("No Swiss ratio data is available for the selected municipalities.");
+  }
+  return { rows, findings };
+}
+
+function buildAgeDistributionComparisonData(bfss = []) {
+  const cohorts = [];
+  const cohortSeen = new Set();
+  const sharesByBfs = {};
+  const totalsByBfs = {};
+  const dominantByBfs = {};
+
+  bfss.forEach((bfs) => {
+    const block = compareSnapshotForBfs(bfs)?.age_distribution || {};
+    const labels = Array.isArray(block.cohorts) ? block.cohorts.map((v) => String(v || "").trim()).filter(Boolean) : [];
+    labels.forEach((label) => {
+      if (cohortSeen.has(label)) return;
+      cohortSeen.add(label);
+      cohorts.push(label);
+    });
+    const male = Array.isArray(block.male) ? block.male : [];
+    const female = Array.isArray(block.female) ? block.female : [];
+    const totals = labels.map((_, idx) => {
+      const m = Number(male[idx]);
+      const f = Number(female[idx]);
+      return (Number.isFinite(m) ? m : 0) + (Number.isFinite(f) ? f : 0);
+    });
+    const total = totals.reduce((acc, value) => acc + value, 0);
+    totalsByBfs[bfs] = total;
+    const shareMap = {};
+    labels.forEach((label, idx) => {
+      const share = total > 0 ? (100 * totals[idx] / total) : 0;
+      shareMap[label] = share;
+    });
+    sharesByBfs[bfs] = shareMap;
+    const dominant = labels
+      .map((label) => ({ label, share: shareMap[label] || 0 }))
+      .sort((a, b) => (b.share - a.share) || a.label.localeCompare(b.label))[0];
+    dominantByBfs[bfs] = dominant || { label: "N/A", share: NaN };
+  });
+
+  const findings = [];
+  const validTotals = bfss
+    .map((bfs) => ({ bfs, label: compareMunicipalityLabel(bfs), total: totalsByBfs[bfs] || 0 }))
+    .filter((item) => item.total > 0);
+  if (validTotals.length) {
+    const top = [...validTotals].sort((a, b) => (b.total - a.total) || a.bfs.localeCompare(b.bfs))[0];
+    findings.push(`Largest age-distribution total: ${top.label} (${Math.round(top.total).toLocaleString()}).`);
+  }
+  if (cohorts.length > 0 && bfss.length > 1) {
+    const spreads = cohorts.map((cohort) => {
+      const vals = bfss.map((bfs) => Number(sharesByBfs[bfs]?.[cohort] || 0));
+      const max = Math.max(...vals);
+      const min = Math.min(...vals);
+      return { cohort, spread: max - min };
+    }).sort((a, b) => (b.spread - a.spread) || a.cohort.localeCompare(b.cohort));
+    if (spreads.length) {
+      findings.push(`Largest cohort share spread: ${spreads[0].cohort} (${spreads[0].spread.toFixed(1)} percentage points).`);
+    }
+  }
+
+  return { cohorts, sharesByBfs, totalsByBfs, dominantByBfs, findings };
+}
+
+function buildEmploymentBySectorComparisonData(bfss = []) {
+  const sectors = [];
+  const sectorSeen = new Set();
+  const totalsByBfs = {};
+  const sharesByBfs = {};
+  const dominantByBfs = {};
+
+  bfss.forEach((bfs) => {
+    const block = compareSnapshotForBfs(bfs)?.employment_by_sector || {};
+    const labels = Array.isArray(block.sectors) ? block.sectors.map((v) => String(v || "").trim()).filter(Boolean) : [];
+    labels.forEach((label) => {
+      if (sectorSeen.has(label)) return;
+      sectorSeen.add(label);
+      sectors.push(label);
+    });
+    const male = Array.isArray(block.male) ? block.male : [];
+    const female = Array.isArray(block.female) ? block.female : [];
+    const totals = labels.map((_, idx) => {
+      const m = Number(male[idx]);
+      const f = Number(female[idx]);
+      return (Number.isFinite(m) ? m : 0) + (Number.isFinite(f) ? f : 0);
+    });
+    const total = totals.reduce((acc, value) => acc + value, 0);
+    totalsByBfs[bfs] = total;
+    const shareMap = {};
+    labels.forEach((label, idx) => {
+      shareMap[label] = total > 0 ? (100 * totals[idx] / total) : 0;
+    });
+    sharesByBfs[bfs] = shareMap;
+    const dominant = labels
+      .map((label) => ({ label, share: shareMap[label] || 0 }))
+      .sort((a, b) => (b.share - a.share) || a.label.localeCompare(b.label))[0];
+    dominantByBfs[bfs] = dominant || { label: "N/A", share: NaN };
+  });
+
+  const findings = [];
+  const validTotals = bfss
+    .map((bfs) => ({ bfs, label: compareMunicipalityLabel(bfs), total: totalsByBfs[bfs] || 0 }))
+    .filter((item) => item.total > 0);
+  if (validTotals.length) {
+    const top = [...validTotals].sort((a, b) => (b.total - a.total) || a.bfs.localeCompare(b.bfs))[0];
+    findings.push(`Highest employment total: ${top.label} (${Math.round(top.total).toLocaleString()}).`);
+  }
+  const dominantSet = new Set(
+    bfss
+      .map((bfs) => dominantByBfs[bfs]?.label)
+      .filter((label) => label && label !== "N/A"),
+  );
+  if (dominantSet.size === 1 && dominantSet.size > 0) {
+    findings.push(`All selected municipalities have the same dominant employment sector: ${[...dominantSet][0]}.`);
+  } else if (dominantSet.size > 1) {
+    findings.push(`Dominant employment sectors vary across municipalities (${dominantSet.size} distinct sectors).`);
+  }
+
+  return { sectors, totalsByBfs, sharesByBfs, dominantByBfs, findings };
+}
+
+function buildCategoryComparisonData(bfss = [], panelId) {
+  const panelTitle = snapshotPanelTitle(panelId);
+  const matrix = snapshotShareMatrixForPanel(bfss, panelId);
+  const findings = [];
+  const validDominant = bfss
+    .map((bfs) => ({ bfs, label: compareMunicipalityLabel(bfs), ...(matrix.dominantByBfs[bfs] || {}) }))
+    .filter((row) => row.label && row.label !== "N/A");
+
+  const dominantSet = new Set(validDominant.map((row) => row.label));
+  if (dominantSet.size === 1 && dominantSet.size > 0) {
+    findings.push(`All selected municipalities share the same dominant ${panelTitle.toLowerCase()} category: ${[...dominantSet][0]}.`);
+  } else if (dominantSet.size > 1) {
+    findings.push(`Dominant ${panelTitle.toLowerCase()} categories vary across municipalities (${dominantSet.size} distinct categories).`);
+  }
+  const strongest = validDominant
+    .filter((row) => Number.isFinite(Number(row.share)))
+    .sort((a, b) => (Number(b.share) - Number(a.share)) || a.bfs.localeCompare(b.bfs))[0];
+  if (strongest) {
+    findings.push(`Highest dominant-category concentration: ${strongest.label} (${Number(strongest.share).toFixed(1)}%).`);
+  }
+
+  return {
+    panelId,
+    panelTitle,
+    categories: matrix.categories,
+    matrixByBfs: matrix.matrixByBfs,
+    dominantByBfs: matrix.dominantByBfs,
+    findings,
+  };
+}
+
+function buildSnapshotCoreComparisonData(bfss = []) {
+  const include = new Set(COMPARE_SNAPSHOT_CORE_PANEL_IDS);
+  return {
+    swissRatio: include.has("swiss_ratio") ? buildSwissRatioComparisonData(bfss) : { rows: [], findings: [] },
+    ageDistribution: include.has("age_distribution")
+      ? buildAgeDistributionComparisonData(bfss)
+      : { cohorts: [], sharesByBfs: {}, totalsByBfs: {}, dominantByBfs: {}, findings: [] },
+    constructionPeriod: include.has("construction_period")
+      ? buildCategoryComparisonData(bfss, "construction_period")
+      : { panelId: "construction_period", panelTitle: snapshotPanelTitle("construction_period"), categories: [], matrixByBfs: {}, dominantByBfs: {}, findings: [] },
+    heatSource: include.has("heat_source")
+      ? buildCategoryComparisonData(bfss, "heat_source")
+      : { panelId: "heat_source", panelTitle: snapshotPanelTitle("heat_source"), categories: [], matrixByBfs: {}, dominantByBfs: {}, findings: [] },
+    employment: include.has("employment_by_sector")
+      ? buildEmploymentBySectorComparisonData(bfss)
+      : { sectors: [], totalsByBfs: {}, sharesByBfs: {}, dominantByBfs: {}, findings: [] },
+  };
+}
+
+function buildSnapshotFindingListMarkup(findings = []) {
+  if (!Array.isArray(findings) || !findings.length) {
+    return `<p class="compare-inline-note">No additional findings available.</p>`;
+  }
+  return `
+    <ul class="compare-finding-list">
+      ${findings.map((item) => `<li>${escapeHtml(String(item || ""))}</li>`).join("")}
+    </ul>
+  `;
+}
+
+function renderCompareTableMarkup(headers = [], rows = []) {
+  return `
+    <div class="compare-table-wrap">
+      <table class="compare-table">
+        <thead>
+          <tr>${headers.map((header) => `<th>${escapeHtml(String(header || ""))}</th>`).join("")}</tr>
+        </thead>
+        <tbody>
+          ${rows.map((row) => `<tr>${row.map((cell) => `<td>${escapeHtml(String(cell ?? "N/A"))}</td>`).join("")}</tr>`).join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function buildCompareSnapshotCoreMarkup(bfss = [], coreData = null) {
+  if (!bfss.length || !coreData) return "";
+
+  const swissRows = coreData.swissRatio.rows.map((row) => ([
+    row.label,
+    Number.isFinite(row.swiss) ? Math.round(row.swiss).toLocaleString() : "N/A",
+    Number.isFinite(row.nonSwiss) ? Math.round(row.nonSwiss).toLocaleString() : "N/A",
+    Number.isFinite(row.ratio) ? row.ratio.toFixed(2) : "N/A",
+    Number.isFinite(row.delta) ? (row.delta >= 0 ? `+${row.delta.toFixed(2)}` : row.delta.toFixed(2)) : "N/A",
+  ]));
+  const swissMarkup = `
+    <section class="compare-core-panel">
+      <h4>Swiss-Born Ratio</h4>
+      ${renderCompareTableMarkup(["Municipality", "Swiss-born", "Foreign-born", "Ratio", "Delta vs first"], swissRows)}
+      ${buildSnapshotFindingListMarkup(coreData.swissRatio.findings)}
+    </section>
+  `;
+
+  const ageTotalRows = bfss.map((bfs) => ([
+    compareMunicipalityLabel(bfs),
+    Math.round(coreData.ageDistribution.totalsByBfs[bfs] || 0).toLocaleString(),
+    coreData.ageDistribution.dominantByBfs[bfs]?.label || "N/A",
+    formatComparePercent(coreData.ageDistribution.dominantByBfs[bfs]?.share, 1),
+  ]));
+  const ageShareRows = coreData.ageDistribution.cohorts.map((cohort) => ([
+    cohort,
+    ...bfss.map((bfs) => formatComparePercent(coreData.ageDistribution.sharesByBfs[bfs]?.[cohort], 1)),
+  ]));
+  const ageMarkup = `
+    <section class="compare-core-panel">
+      <h4>Age Distribution</h4>
+      ${renderCompareTableMarkup(["Municipality", "Total", "Dominant cohort", "Dominant share"], ageTotalRows)}
+      ${renderCompareTableMarkup(["Cohort", ...bfss.map((bfs) => compareMunicipalityName(bfs))], ageShareRows)}
+      ${buildSnapshotFindingListMarkup(coreData.ageDistribution.findings)}
+    </section>
+  `;
+
+  const constructionDominantRows = bfss.map((bfs) => ([
+    compareMunicipalityLabel(bfs),
+    coreData.constructionPeriod.dominantByBfs[bfs]?.label || "N/A",
+    formatComparePercent(coreData.constructionPeriod.dominantByBfs[bfs]?.share, 1),
+  ]));
+  const constructionShareRows = coreData.constructionPeriod.categories.map((category) => ([
+    category,
+    ...bfss.map((bfs) => formatComparePercent(coreData.constructionPeriod.matrixByBfs[bfs]?.[category], 1)),
+  ]));
+  const constructionMarkup = `
+    <section class="compare-core-panel">
+      <h4>Construction Period</h4>
+      ${renderCompareTableMarkup(["Municipality", "Dominant category", "Dominant share"], constructionDominantRows)}
+      ${renderCompareTableMarkup(["Category", ...bfss.map((bfs) => compareMunicipalityName(bfs))], constructionShareRows)}
+      ${buildSnapshotFindingListMarkup(coreData.constructionPeriod.findings)}
+    </section>
+  `;
+
+  const heatDominantRows = bfss.map((bfs) => ([
+    compareMunicipalityLabel(bfs),
+    coreData.heatSource.dominantByBfs[bfs]?.label || "N/A",
+    formatComparePercent(coreData.heatSource.dominantByBfs[bfs]?.share, 1),
+  ]));
+  const heatShareRows = coreData.heatSource.categories.map((category) => ([
+    category,
+    ...bfss.map((bfs) => formatComparePercent(coreData.heatSource.matrixByBfs[bfs]?.[category], 1)),
+  ]));
+  const heatMarkup = `
+    <section class="compare-core-panel">
+      <h4>Heat Source</h4>
+      ${renderCompareTableMarkup(["Municipality", "Dominant category", "Dominant share"], heatDominantRows)}
+      ${renderCompareTableMarkup(["Category", ...bfss.map((bfs) => compareMunicipalityName(bfs))], heatShareRows)}
+      ${buildSnapshotFindingListMarkup(coreData.heatSource.findings)}
+    </section>
+  `;
+
+  const employmentRows = bfss.map((bfs) => ([
+    compareMunicipalityLabel(bfs),
+    Math.round(coreData.employment.totalsByBfs[bfs] || 0).toLocaleString(),
+    coreData.employment.dominantByBfs[bfs]?.label || "N/A",
+    formatComparePercent(coreData.employment.dominantByBfs[bfs]?.share, 1),
+  ]));
+  const employmentShareRows = coreData.employment.sectors.map((sector) => ([
+    sector,
+    ...bfss.map((bfs) => formatComparePercent(coreData.employment.sharesByBfs[bfs]?.[sector], 1)),
+  ]));
+  const employmentMarkup = `
+    <section class="compare-core-panel">
+      <h4>Employment by Sector</h4>
+      ${renderCompareTableMarkup(["Municipality", "Total", "Dominant sector", "Dominant share"], employmentRows)}
+      ${renderCompareTableMarkup(["Sector", ...bfss.map((bfs) => compareMunicipalityName(bfs))], employmentShareRows)}
+      ${buildSnapshotFindingListMarkup(coreData.employment.findings)}
+    </section>
+  `;
+
+  return `
+    <article class="compare-card compare-card--full">
+      <h3>Expanded Snapshot Core Panel Compare</h3>
+      <p class="compare-inline-note">The five core Snapshot panels are compared side-by-side using municipality ordering from the selected comparison set.</p>
+      <div class="compare-core-grid">
+        ${swissMarkup}
+        ${ageMarkup}
+        ${constructionMarkup}
+        ${heatMarkup}
+        ${employmentMarkup}
+      </div>
+    </article>
+  `;
+}
+
+function buildCompareMetricsMarkup() {
+  const bfss = state.compareBfsOrder;
+  if (!bfss.length) {
+    return `<p class="compare-empty">No municipalities selected for comparison yet.</p>`;
+  }
+  const headers = bfss.map((bfs) => `<th>${escapeHtml(compareMunicipalityName(bfs))}</th>`).join("");
+  const rows = [
+    {
+      label: "Bivariate Class",
+      values: bfss.map((bfs) => String(state.records[bfs]?.bi_class || "N/A")),
+    },
+    {
+      label: "Temp (°C)",
+      values: bfss.map((bfs) => formatMetricValue(state.records[bfs]?.temp, 2)),
+    },
+    {
+      label: "Old Buildings (%)",
+      values: bfss.map((bfs) => formatMetricValue(state.records[bfs]?.pct_old1919, 1)),
+    },
+    {
+      label: "Climate Risk Score",
+      values: bfss.map((bfs) => formatMetricValue(state.records[bfs]?.climate_risk_score, 2)),
+    },
+    {
+      label: "Exceptional Status",
+      values: bfss.map((bfs) => compareStatusLabel(state.climateStageStatus[bfs] || "missing")),
+    },
+  ];
+  const body = rows.map((row) => `
+    <tr>
+      <th>${escapeHtml(row.label)}</th>
+      ${row.values.map((value) => `<td>${escapeHtml(String(value))}</td>`).join("")}
+    </tr>
+  `).join("");
+  return `
+    <article class="compare-card">
+      <h3>Core Metrics</h3>
+      <table class="compare-table">
+        <thead>
+          <tr>
+            <th>Metric</th>
+            ${headers}
+          </tr>
+        </thead>
+        <tbody>${body}</tbody>
+      </table>
+    </article>
+  `;
+}
+
+function buildCompareSnapshotMarkup() {
+  const bfss = state.compareBfsOrder;
+  if (!bfss.length) {
+    return `<p class="compare-empty">No municipalities selected.</p>`;
+  }
+  const coreData = buildSnapshotCoreComparisonData(bfss);
+  const panelOptions = SNAPSHOT_PANELS
+    .map((panel) => `<option value="${escapeHtml(panel.id)}"${panel.id === state.compareModalSnapshotPanel ? " selected" : ""}>${escapeHtml(panel.title)}</option>`)
+    .join("");
+
+  const panelId = state.compareModalSnapshotPanel;
+  const panelLabel = SNAPSHOT_PANELS.find((p) => p.id === panelId)?.title || "Snapshot panel";
+  const seriesByBfs = {};
+  bfss.forEach((bfs) => {
+    const profile = state.compareProfileCache[bfs];
+    seriesByBfs[bfs] = snapshotPanelSeries(panelId, profile?.snapshot || null);
+  });
+  const nonNull = bfss.map((bfs) => seriesByBfs[bfs]).filter(Boolean);
+
+  if (!nonNull.length) {
+    return `
+      <article class="compare-card">
+        <h3>Snapshot Comparison</h3>
+        <label class="compare-panel-select-label">
+          <span>Snapshot panel</span>
+          <select data-compare-snapshot-panel>${panelOptions}</select>
+        </label>
+        <p class="compare-empty">No snapshot data available for the selected panel.</p>
+      </article>
+      ${buildCompareSnapshotCoreMarkup(bfss, coreData)}
+    `;
+  }
+
+  let content = "";
+  const scalar = nonNull.every((item) => item.kind === "scalar");
+  if (scalar) {
+    const rows = bfss.map((bfs) => {
+      const item = seriesByBfs[bfs];
+      const value = item?.value;
+      const raw = item?.raw;
+      const shown = Number.isFinite(value) ? Number(value).toFixed(2) : (raw ? String(raw) : "N/A");
+      return `<tr><th>${escapeHtml(compareMunicipalityLabel(bfs))}</th><td>${escapeHtml(shown)}</td></tr>`;
+    }).join("");
+    content = `
+      <table class="compare-table">
+        <thead><tr><th>Municipality</th><th>${escapeHtml(panelLabel)}</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    `;
+  } else {
+    const labels = [];
+    const labelSet = new Set();
+    bfss.forEach((bfs) => {
+      const item = seriesByBfs[bfs];
+      if (!item || item.kind !== "series") return;
+      item.labels.forEach((label) => {
+        const key = String(label);
+        if (labelSet.has(key)) return;
+        labelSet.add(key);
+        labels.push(key);
+      });
+    });
+    const datasets = bfss.map((bfs) => {
+      const item = seriesByBfs[bfs];
+      const valuesByLabel = {};
+      if (item && item.kind === "series") {
+        item.labels.forEach((label, idx) => {
+          valuesByLabel[String(label)] = Number(item.values[idx]) || 0;
+        });
+      }
+      return {
+        label: compareMunicipalityName(bfs),
+        data: labels.map((label) => valuesByLabel[label] ?? 0),
+        backgroundColor: compareColourByBfs(bfs),
+        borderWidth: 0,
+      };
+    });
+    const chartId = "compare-snapshot-chart";
+    content = `
+      <div class="compare-chart-wrap"><canvas id="${chartId}"></canvas></div>
+    `;
+    window.requestAnimationFrame(() => {
+      renderCompareGroupedBarChart(chartId, labels, datasets, panelLabel);
+    });
+  }
+
+  return `
+    <article class="compare-card">
+      <h3>Snapshot Comparison</h3>
+      <label class="compare-panel-select-label">
+        <span>Snapshot panel</span>
+        <select data-compare-snapshot-panel>${panelOptions}</select>
+      </label>
+      ${content}
+    </article>
+    ${buildCompareSnapshotCoreMarkup(bfss, coreData)}
+  `;
+}
+
+function buildCompareWeatherMarkup() {
+  const bfss = state.compareBfsOrder;
+  if (!bfss.length) return `<p class="compare-empty">No municipalities selected.</p>`;
+  const withWeather = bfss.filter((bfs) => !!state.compareWeatherCache[bfs]);
+  if (!withWeather.length) {
+    return `<p class="compare-empty">Weather data is loading or unavailable for selected municipalities.</p>`;
+  }
+
+  const stationRows = bfss.map((bfs) => {
+    const weather = state.compareWeatherCache[bfs];
+    const station = weather?.station?.name ? String(weather.station.name) : "Unavailable";
+    return `<li><strong>${escapeHtml(compareMunicipalityName(bfs))}:</strong> ${escapeHtml(station)}</li>`;
+  }).join("");
+
+  const blocks = COMPARE_WEATHER_METRICS.map((metric) => {
+    const chartId = `compare-weather-${metric.key}`;
+    window.requestAnimationFrame(() => {
+      const datasets = bfss.map((bfs) => {
+        const summary = weatherSummarySeries(state.compareWeatherCache[bfs]);
+        const values = summary?.[metric.key] || [];
+        return {
+          label: compareMunicipalityName(bfs),
+          data: MONTH_LABELS.map((_, idx) => {
+            const v = values[idx];
+            return Number.isFinite(Number(v)) ? Number(v) : null;
+          }),
+          backgroundColor: compareColourByBfs(bfs),
+          borderWidth: 0,
+        };
+      });
+      renderCompareGroupedBarChart(chartId, MONTH_LABELS, datasets, metric.label);
+    });
+    return `
+      <article class="compare-card">
+        <h3>${escapeHtml(metric.label)}</h3>
+        <div class="compare-chart-wrap"><canvas id="${chartId}"></canvas></div>
+      </article>
+    `;
+  }).join("");
+
+  return `
+    <article class="compare-card compare-card--full">
+      <h3>Weather station references</h3>
+      <ul class="compare-station-list">${stationRows}</ul>
+    </article>
+    ${blocks}
+  `;
+}
+
+function markdownCell(value) {
+  const text = String(value ?? "N/A")
+    .replace(/\r?\n/g, " ")
+    .replace(/\|/g, "\\|")
+    .trim();
+  return text || "N/A";
+}
+
+function markdownTable(headers = [], rows = []) {
+  const head = `| ${headers.map(markdownCell).join(" | ")} |`;
+  const sep = `| ${headers.map(() => "---").join(" | ")} |`;
+  const body = rows.map((row) => `| ${row.map(markdownCell).join(" | ")} |`).join("\n");
+  return body ? `${head}\n${sep}\n${body}` : `${head}\n${sep}`;
+}
+
+function markdownList(items = []) {
+  if (!Array.isArray(items) || !items.length) return "- No findings available.";
+  return items.map((item) => `- ${String(item || "").trim()}`).join("\n");
+}
+
+function compareWeatherSummaryByBfs(bfss = []) {
+  const out = {};
+  bfss.forEach((bfs) => {
+    const weather = state.compareWeatherCache[bfs] || null;
+    out[bfs] = weatherSummarySeries(weather);
+  });
+  return out;
+}
+
+function buildWeatherSummaryFindings(bfss = [], weatherByBfs = {}) {
+  const findings = [];
+  const annualMeans = bfss
+    .map((bfs) => {
+      const series = weatherByBfs[bfs]?.tempMean || [];
+      const valid = series.map((v) => Number(v)).filter((v) => Number.isFinite(v));
+      const annual = valid.length ? valid.reduce((acc, v) => acc + v, 0) / valid.length : NaN;
+      return { bfs, label: compareMunicipalityLabel(bfs), annual };
+    })
+    .filter((row) => Number.isFinite(row.annual));
+  if (annualMeans.length) {
+    const warmest = [...annualMeans].sort((a, b) => (b.annual - a.annual) || a.bfs.localeCompare(b.bfs))[0];
+    findings.push(`Warmest annual mean temperature profile: ${warmest.label} (${warmest.annual.toFixed(2)}°C).`);
+    if (annualMeans.length > 1) {
+      const coolest = [...annualMeans].sort((a, b) => (a.annual - b.annual) || a.bfs.localeCompare(b.bfs))[0];
+      findings.push(`Annual mean spread across compared municipalities: ${(warmest.annual - coolest.annual).toFixed(2)}°C.`);
+    }
+  }
+
+  let best = null;
+  bfss.forEach((bfs) => {
+    const values = weatherByBfs[bfs]?.ghiTotal || [];
+    values.forEach((value, idx) => {
+      const n = Number(value);
+      if (!Number.isFinite(n)) return;
+      if (!best || n > best.value || (n === best.value && String(bfs).localeCompare(String(best.bfs)) < 0)) {
+        best = { bfs, value: n, month: MONTH_LABELS[idx] || `M${idx + 1}` };
+      }
+    });
+  });
+  if (best) {
+    findings.push(`Highest monthly GHI total: ${compareMunicipalityLabel(best.bfs)} in ${best.month} (${best.value.toFixed(0)}).`);
+  }
+  return findings;
+}
+
+function reportTimestampStamp(now = new Date()) {
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, "0");
+  const d = String(now.getDate()).padStart(2, "0");
+  const hh = String(now.getHours()).padStart(2, "0");
+  const mm = String(now.getMinutes()).padStart(2, "0");
+  return `${y}${m}${d}_${hh}${mm}`;
+}
+
+function buildComparisonReportMarkdown() {
+  const bfss = state.compareBfsOrder;
+  if (!bfss.length) return "";
+
+  const now = new Date();
+  const coreData = buildSnapshotCoreComparisonData(bfss);
+  const weatherByBfs = compareWeatherSummaryByBfs(bfss);
+  const weatherFindings = buildWeatherSummaryFindings(bfss, weatherByBfs);
+
+  const lines = [];
+  lines.push("# Municipality Comparison Report");
+  lines.push("");
+  lines.push(`Generated: ${now.toISOString()}`);
+  lines.push("");
+
+  const selectedIndicators = [...state.selectedClimateIndicators]
+    .map((key) => formatRawFieldLabel(key))
+    .join(", ");
+  const reportMetaRows = [
+    ["Season", String(el.season?.value || "N/A")],
+    ["Temperature method", String(el.tempMethod?.value || "N/A")],
+    ["Exclude non-habitable areas", el.nonHabitable?.checked ? "Yes" : "No"],
+    ["Cold k_temp", String(el.kTemp?.value || "N/A")],
+    ["Old k_old", String(el.kOld?.value || "N/A")],
+    ["Bivariate class exclusions", [...state.legendSelectedClasses].join(", ") || "None"],
+    ["Stage 2 material+hearth reduction", state.applyMaterialHearthFilter ? "Enabled" : "Disabled"],
+    ["Stage 3 climate prioritisation", state.applyClimatePriority ? "Enabled" : "Disabled"],
+    ["Climate top share (%)", String(normalizeClimateTopShare(state.climateTopSharePct))],
+    ["Climate indicators", selectedIndicators || "None"],
+    ["Selected municipalities", String(bfss.length)],
+  ];
+  lines.push("## Report Metadata");
+  lines.push("");
+  lines.push(markdownTable(["Setting", "Value"], reportMetaRows));
+  lines.push("");
+
+  const municipalityRows = bfss.map((bfs) => [
+    compareMunicipalityName(bfs),
+    compareMunicipalityCanton(bfs) || "N/A",
+    bfs,
+  ]);
+  lines.push("## Municipality Summary");
+  lines.push("");
+  lines.push(markdownTable(["Municipality", "Canton", "BFS"], municipalityRows));
+  lines.push("");
+
+  const analysisRows = bfss.map((bfs) => [
+    compareMunicipalityName(bfs),
+    String(state.records[bfs]?.bi_class || "N/A"),
+    formatCompareNumber(state.records[bfs]?.temp, 2),
+    formatComparePercent(state.records[bfs]?.pct_old1919, 1),
+    formatCompareNumber(state.records[bfs]?.climate_risk_score, 2),
+    compareStatusLabel(state.climateStageStatus[bfs] || "missing"),
+  ]);
+  lines.push("## Core Analysis Metrics");
+  lines.push("");
+  lines.push(markdownTable(
+    ["Municipality", "Bivariate Class", "Temp (°C)", "Old Buildings (%)", "Climate Risk Score", "Exceptional status"],
+    analysisRows,
+  ));
+  lines.push("");
+
+  lines.push("## Snapshot Core Panels");
+  lines.push("");
+  const swissRows = coreData.swissRatio.rows.map((row) => [
+    row.label,
+    Number.isFinite(row.swiss) ? Math.round(row.swiss).toLocaleString() : "N/A",
+    Number.isFinite(row.nonSwiss) ? Math.round(row.nonSwiss).toLocaleString() : "N/A",
+    Number.isFinite(row.ratio) ? row.ratio.toFixed(2) : "N/A",
+    Number.isFinite(row.delta) ? (row.delta >= 0 ? `+${row.delta.toFixed(2)}` : row.delta.toFixed(2)) : "N/A",
+  ]);
+  lines.push("### Swiss-Born Ratio");
+  lines.push("");
+  lines.push(markdownTable(["Municipality", "Swiss-born", "Foreign-born", "Ratio", "Delta vs first"], swissRows));
+  lines.push("");
+  lines.push(markdownList(coreData.swissRatio.findings));
+  lines.push("");
+
+  lines.push("### Age Distribution");
+  lines.push("");
+  const ageTotalRows = bfss.map((bfs) => [
+    compareMunicipalityName(bfs),
+    Math.round(coreData.ageDistribution.totalsByBfs[bfs] || 0).toLocaleString(),
+    coreData.ageDistribution.dominantByBfs[bfs]?.label || "N/A",
+    formatComparePercent(coreData.ageDistribution.dominantByBfs[bfs]?.share, 1),
+  ]);
+  lines.push(markdownTable(["Municipality", "Total", "Dominant cohort", "Dominant share"], ageTotalRows));
+  lines.push("");
+  const ageShareRows = coreData.ageDistribution.cohorts.map((cohort) => [
+    cohort,
+    ...bfss.map((bfs) => formatComparePercent(coreData.ageDistribution.sharesByBfs[bfs]?.[cohort], 1)),
+  ]);
+  lines.push(markdownTable(["Cohort", ...bfss.map((bfs) => compareMunicipalityName(bfs))], ageShareRows));
+  lines.push("");
+  lines.push(markdownList(coreData.ageDistribution.findings));
+  lines.push("");
+
+  lines.push("### Construction Period");
+  lines.push("");
+  const constructionDominantRows = bfss.map((bfs) => [
+    compareMunicipalityName(bfs),
+    coreData.constructionPeriod.dominantByBfs[bfs]?.label || "N/A",
+    formatComparePercent(coreData.constructionPeriod.dominantByBfs[bfs]?.share, 1),
+  ]);
+  lines.push(markdownTable(["Municipality", "Dominant category", "Dominant share"], constructionDominantRows));
+  lines.push("");
+  const constructionShareRows = coreData.constructionPeriod.categories.map((category) => [
+    category,
+    ...bfss.map((bfs) => formatComparePercent(coreData.constructionPeriod.matrixByBfs[bfs]?.[category], 1)),
+  ]);
+  lines.push(markdownTable(["Category", ...bfss.map((bfs) => compareMunicipalityName(bfs))], constructionShareRows));
+  lines.push("");
+  lines.push(markdownList(coreData.constructionPeriod.findings));
+  lines.push("");
+
+  lines.push("### Heat Source");
+  lines.push("");
+  const heatDominantRows = bfss.map((bfs) => [
+    compareMunicipalityName(bfs),
+    coreData.heatSource.dominantByBfs[bfs]?.label || "N/A",
+    formatComparePercent(coreData.heatSource.dominantByBfs[bfs]?.share, 1),
+  ]);
+  lines.push(markdownTable(["Municipality", "Dominant category", "Dominant share"], heatDominantRows));
+  lines.push("");
+  const heatShareRows = coreData.heatSource.categories.map((category) => [
+    category,
+    ...bfss.map((bfs) => formatComparePercent(coreData.heatSource.matrixByBfs[bfs]?.[category], 1)),
+  ]);
+  lines.push(markdownTable(["Category", ...bfss.map((bfs) => compareMunicipalityName(bfs))], heatShareRows));
+  lines.push("");
+  lines.push(markdownList(coreData.heatSource.findings));
+  lines.push("");
+
+  lines.push("### Employment by Sector");
+  lines.push("");
+  const employmentRows = bfss.map((bfs) => [
+    compareMunicipalityName(bfs),
+    Math.round(coreData.employment.totalsByBfs[bfs] || 0).toLocaleString(),
+    coreData.employment.dominantByBfs[bfs]?.label || "N/A",
+    formatComparePercent(coreData.employment.dominantByBfs[bfs]?.share, 1),
+  ]);
+  lines.push(markdownTable(["Municipality", "Total", "Dominant sector", "Dominant share"], employmentRows));
+  lines.push("");
+  const employmentShareRows = coreData.employment.sectors.map((sector) => [
+    sector,
+    ...bfss.map((bfs) => formatComparePercent(coreData.employment.sharesByBfs[bfs]?.[sector], 1)),
+  ]);
+  lines.push(markdownTable(["Sector", ...bfss.map((bfs) => compareMunicipalityName(bfs))], employmentShareRows));
+  lines.push("");
+  lines.push(markdownList(coreData.employment.findings));
+  lines.push("");
+
+  lines.push("## Weather Monthly Summaries");
+  lines.push("");
+  const stationRows = bfss.map((bfs) => {
+    const weather = state.compareWeatherCache[bfs];
+    const station = weather?.station?.name ? String(weather.station.name) : "Unavailable";
+    return [compareMunicipalityName(bfs), station];
+  });
+  lines.push(markdownTable(["Municipality", "Weather station"], stationRows));
+  lines.push("");
+
+  COMPARE_WEATHER_METRICS.forEach((metric) => {
+    lines.push(`### ${metric.label}`);
+    lines.push("");
+    const rows = MONTH_LABELS.map((month, idx) => ([
+      month,
+      ...bfss.map((bfs) => formatCompareNumber(weatherByBfs[bfs]?.[metric.key]?.[idx], metric.digits)),
+    ]));
+    lines.push(markdownTable(["Month", ...bfss.map((bfs) => compareMunicipalityName(bfs))], rows));
+    lines.push("");
+  });
+
+  const keyFindings = [
+    ...(coreData.swissRatio.findings || []),
+    ...(coreData.ageDistribution.findings || []),
+    ...(coreData.constructionPeriod.findings || []),
+    ...(coreData.heatSource.findings || []),
+    ...(coreData.employment.findings || []),
+    ...weatherFindings,
+  ].filter(Boolean);
+
+  lines.push("## Key Findings");
+  lines.push("");
+  lines.push(markdownList(keyFindings));
+  lines.push("");
+
+  return lines.join("\n");
+}
+
+function downloadComparisonReport() {
+  const markdown = buildComparisonReportMarkdown();
+  if (!markdown) {
+    setStatus("No municipalities selected for comparison report.");
+    return;
+  }
+  const stamp = reportTimestampStamp(new Date());
+  const season = String(el.season?.value || "annual");
+  const method = String(el.tempMethod?.value || "mean-range");
+  const filename = `municipality_comparison_${season}_${method}_${stamp}.md`;
+  const blob = new Blob([markdown], { type: "text/markdown;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+  setStatus(`Comparison report downloaded (${state.compareBfsOrder.length} municipalities).`);
+}
+
+function renderCompareModalSelectedStrip() {
+  if (!el.compareModalSelected) return;
+  if (!state.compareBfsOrder.length) {
+    el.compareModalSelected.innerHTML = "";
+    return;
+  }
+  const cards = state.compareBfsOrder.map((bfs) => {
+    const loading = !!(state.compareProfileFetchInFlight[bfs] || state.compareWeatherFetchInFlight[bfs]);
+    const label = compareMunicipalityLabel(bfs);
+    return `
+      <div class="compare-selected-card">
+        <div>
+          <strong>${escapeHtml(label)}</strong>
+          <p>${escapeHtml(`BFS ${bfs}`)}${loading ? " · Loading..." : ""}</p>
+        </div>
+        <button type="button" data-compare-remove="${escapeHtml(bfs)}" aria-label="Remove ${escapeHtml(label)} from comparison">×</button>
+      </div>
+    `;
+  }).join("");
+  el.compareModalSelected.innerHTML = cards;
+}
+
+function renderCompareModal() {
+  if (!el.compareModal) return;
+  if (!state.compareModalOpen) {
+    el.compareModal.classList.add("hidden");
+    el.compareModal.setAttribute("aria-hidden", "true");
+    destroyCompareCharts();
+    return;
+  }
+
+  el.compareModal.classList.remove("hidden");
+  el.compareModal.setAttribute("aria-hidden", "false");
+  if (!compareModalSectionIsValid(state.compareModalActiveSection)) {
+    state.compareModalActiveSection = "metrics";
+  }
+
+  if (el.compareModalSections) {
+    el.compareModalSections.innerHTML = COMPARE_SECTIONS
+      .map((section) => {
+        const active = section.id === state.compareModalActiveSection ? " is-active" : "";
+        return `<button type="button" class="compare-modal-section${active}" data-compare-section="${escapeHtml(section.id)}">${escapeHtml(section.label)}</button>`;
+      })
+      .join("");
+  }
+
+  renderCompareModalSelectedStrip();
+
+  const hasSelection = state.compareBfsOrder.length > 0;
+  if (el.compareModalReport) {
+    el.compareModalReport.disabled = !hasSelection;
+  }
+  if (el.compareModalState) {
+    if (!hasSelection) {
+      el.compareModalState.className = "compare-modal-state";
+      el.compareModalState.textContent = "No municipalities selected. Open a municipality profile and click Add to compare.";
+      el.compareModalState.classList.remove("hidden");
+    } else {
+      const loading = state.compareBfsOrder.some((bfs) => state.compareProfileFetchInFlight[bfs] || state.compareWeatherFetchInFlight[bfs]);
+      if (loading) {
+        el.compareModalState.className = "compare-modal-state";
+        el.compareModalState.textContent = "Loading comparison datasets ...";
+        el.compareModalState.classList.remove("hidden");
+      } else {
+        el.compareModalState.className = "compare-modal-state hidden";
+        el.compareModalState.textContent = "";
+      }
+    }
+  }
+
+  if (el.compareModalContent) {
+    destroyCompareCharts();
+    if (!hasSelection) {
+      el.compareModalContent.innerHTML = "";
+      return;
+    }
+    if (state.compareModalActiveSection === "metrics") {
+      el.compareModalContent.innerHTML = buildCompareMetricsMarkup();
+    } else if (state.compareModalActiveSection === "snapshot") {
+      el.compareModalContent.innerHTML = buildCompareSnapshotMarkup();
+    } else {
+      el.compareModalContent.innerHTML = buildCompareWeatherMarkup();
+    }
+  }
+}
+
+function openCompareModal() {
+  if (state.municipalityModalOpen) {
+    closeMunicipalityModal();
+  }
+  state.compareModalReturnFocusEl = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  state.compareModalOpen = true;
+  if (!compareModalSectionIsValid(state.compareModalActiveSection)) {
+    state.compareModalActiveSection = "metrics";
+  }
+  syncBodyModalClass();
+  state.compareBfsOrder.forEach((bfs) => prefetchCompareMunicipalityData(bfs));
+  renderCompareModal();
+  window.requestAnimationFrame(() => {
+    el.compareModalClose?.focus();
+  });
+}
+
+function closeCompareModal() {
+  if (!state.compareModalOpen) return;
+  state.compareModalOpen = false;
+  renderCompareModal();
+  syncBodyModalClass();
+  if (state.compareModalReturnFocusEl && typeof state.compareModalReturnFocusEl.focus === "function") {
+    state.compareModalReturnFocusEl.focus();
+  }
+  state.compareModalReturnFocusEl = null;
+}
+
+function wireCompareModalEvents() {
+  if (el.compareLauncher) {
+    el.compareLauncher.addEventListener("click", () => {
+      if (state.compareLauncherClickTimer) {
+        clearTimeout(state.compareLauncherClickTimer);
+        state.compareLauncherClickTimer = null;
+        clearCompareSelection();
+        return;
+      }
+      state.compareLauncherClickTimer = setTimeout(() => {
+        state.compareLauncherClickTimer = null;
+        openCompareModal();
+      }, 220);
+    });
+  }
+
+  el.municipalityModalCompare?.addEventListener("click", () => {
+    const bfs = state.municipalityModalSelectedBfs;
+    if (!bfs) return;
+    toggleCompareMunicipality(bfs);
+  });
+
+  el.compareModal?.addEventListener("click", (event) => {
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+    if (target.closest("[data-compare-close]")) {
+      closeCompareModal();
+      return;
+    }
+    const sectionNode = target.closest("[data-compare-section]");
+    if (sectionNode) {
+      const sectionId = String(sectionNode.getAttribute("data-compare-section") || "");
+      if (compareModalSectionIsValid(sectionId)) {
+        state.compareModalActiveSection = sectionId;
+        renderCompareModal();
+      }
+      return;
+    }
+    const removeNode = target.closest("[data-compare-remove]");
+    if (removeNode) {
+      const bfs = String(removeNode.getAttribute("data-compare-remove") || "");
+      toggleCompareMunicipality(bfs);
+      return;
+    }
+  });
+
+  el.compareModalClose?.addEventListener("click", () => {
+    closeCompareModal();
+  });
+
+  el.compareModalReport?.addEventListener("click", () => {
+    downloadComparisonReport();
+  });
+
+  el.compareModalContent?.addEventListener("change", (event) => {
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+    const panelNode = target.closest("[data-compare-snapshot-panel]");
+    if (!panelNode) return;
+    const panelId = String(panelNode.value || "").trim();
+    if (!SNAPSHOT_PANELS.some((panel) => panel.id === panelId)) return;
+    state.compareModalSnapshotPanel = panelId;
+    renderCompareModal();
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (!state.compareModalOpen) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeCompareModal();
+      return;
+    }
+    if (event.key === "Tab") {
+      const focusable = compareModalFocusables();
       if (!focusable.length) {
         event.preventDefault();
         return;
@@ -2563,10 +4090,8 @@ function currentPayload() {
     k_temp: Number(el.kTemp.value || 1.0),
     k_old: Number(el.kOld.value || 1.0),
     excluded_bivariate_classes: mode === MUNICIPALITY_DISPLAY_MODES.BIVARIATE ? [...state.legendSelectedClasses] : [],
-    selected_building_material_zone_numbers: selectedMaterialZoneNumbersArray(),
-    selected_hearth_system_zones: selectedHearthSystemZonesArray(),
-    apply_material_filter: !!state.applyMaterialFilter,
-    apply_hearth_filter: !!state.applyHearthFilter,
+    selected_material_hearth_zones: selectedMaterialHearthZonesArray(),
+    apply_material_hearth_filter: !!state.applyMaterialHearthFilter,
     apply_climate_priority: !!state.applyClimatePriority,
     climate_indicator_keys: [...state.selectedClimateIndicators],
     climate_top_share_pct: normalizeClimateTopShare(state.climateTopSharePct),
@@ -2720,30 +4245,16 @@ function layerMainOptionsMarkup(layerId) {
     let municipalityControls = "";
     if (layerId === "bivariate_municipalities") {
       const mode = normalizeMunicipalityDisplayMode(state.municipalityDisplayMode);
-      const zoneOptions = (state.buildingMaterialZoneOptions || [])
+      const materialHearthOptions = (state.materialHearthZoneOptions || [])
         .map((option) => {
-          const zoneNumber = normalizeMaterialZoneNumber(option.zone_number);
-          if (zoneNumber === null) return "";
-          const checked = state.selectedBuildingMaterialZones.has(zoneNumber) ? " checked" : "";
-          const zoneLabel = String(option.zone_label || `Zone ${zoneNumber}`);
+          const zoneCode = String(option.zone_code || "").trim();
+          if (!zoneCode) return "";
+          const checked = state.selectedMaterialHearthZones.has(zoneCode) ? " checked" : "";
+          const label = materialHearthOptionLabel(zoneCode);
           return `
             <label>
-              <input type="checkbox" data-material-zone="${zoneNumber}"${checked}>
-              <span>${escapeHtml(zoneLabel)} (${zoneNumber})</span>
-            </label>
-          `;
-        })
-        .filter(Boolean)
-        .join("");
-      const hearthOptions = (state.hearthSystemZoneOptions || [])
-        .map((label) => {
-          const normalized = String(label || "").trim();
-          if (!normalized) return "";
-          const checked = state.selectedHearthSystemZones.has(normalized) ? " checked" : "";
-          return `
-            <label>
-              <input type="checkbox" data-hearth-zone="${escapeHtml(normalized)}"${checked}>
-              <span>${escapeHtml(normalized)}</span>
+              <input type="checkbox" data-material-hearth-zone="${escapeHtml(zoneCode)}"${checked}>
+              <span>${escapeHtml(label)}</span>
             </label>
           `;
         })
@@ -2762,18 +4273,11 @@ function layerMainOptionsMarkup(layerId) {
             </select>
           </label>
           <div class="field-option-toolbar">
-            <p class="field-option-summary">${state.selectedBuildingMaterialZones.size} zone${state.selectedBuildingMaterialZones.size === 1 ? "" : "s"} selected</p>
-            <button type="button" class="field-option-action" data-clear-material-zones>Clear all</button>
+            <p class="field-option-summary">${state.selectedMaterialHearthZones.size} group${state.selectedMaterialHearthZones.size === 1 ? "" : "s"} selected</p>
+            <button type="button" class="field-option-action" data-clear-material-hearth-zones>Clear all</button>
           </div>
-          <div class="material-zone-fields" data-material-zone-scroll>
-            ${zoneOptions || "<label>No material zones available</label>"}
-          </div>
-          <div class="field-option-toolbar">
-            <p class="field-option-summary">${state.selectedHearthSystemZones.size} hearth group${state.selectedHearthSystemZones.size === 1 ? "" : "s"} selected</p>
-            <button type="button" class="field-option-action" data-clear-hearth-zones>Clear all</button>
-          </div>
-          <div class="material-zone-fields" data-hearth-zone-scroll>
-            ${hearthOptions || "<label>No hearth zones available</label>"}
+          <div class="material-zone-fields" data-material-hearth-zone-scroll>
+            ${materialHearthOptions || "<label>No material + hearth groups available</label>"}
           </div>
         </div>
       `;
@@ -2902,9 +4406,9 @@ function climateRiskInfoMarkup() {
     `
     : "";
   const stateText = !state.applyClimatePriority
-    ? "Stage 4 climate prioritization is toggled off."
+    ? "Stage 3 climate prioritization is toggled off."
     : (!selectionDisabled && state.climateStageEnabled
-      ? `Selecting the top ${normalizeClimateTopShare(state.climateTopSharePct)}% within each hearth group from Stage 3 exceptional municipalities.`
+      ? `Selecting the top ${normalizeClimateTopShare(state.climateTopSharePct)}% globally from Stage 2 material + hearth survivors.`
       : "Climate prioritization is disabled until at least one usable indicator remains selected.");
 
   return `
@@ -2921,20 +4425,17 @@ function climateRiskInfoMarkup() {
 }
 
 function exceptionalFlowInfoMarkup() {
-  const materialChecked = state.applyMaterialFilter ? " checked" : "";
-  const hearthChecked = state.applyHearthFilter ? " checked" : "";
+  const comboChecked = state.applyMaterialHearthFilter ? " checked" : "";
   const climateChecked = state.applyClimatePriority ? " checked" : "";
   return `
     <div class="climate-risk-info">
-      <p>Exceptional places are selected in four stages.</p>
+      <p>Exceptional places are selected in three stages.</p>
       <p><strong>Stage 1:</strong> Bivariate Class identifies exceptional municipalities from temperature and old-building thresholds.</p>
-      <p><strong>Stage 2:</strong> If selected, material groups are reduced to the top 3 per group by Stage 1 severity.</p>
-      <p><strong>Stage 3:</strong> If selected, hearth groups are reduced to the top 3 per group by Stage 1 severity.</p>
-      <p><strong>Stage 4:</strong> Climate prioritization ranks each remaining hearth group separately and keeps the top share within each hearth group.</p>
+      <p><strong>Stage 2:</strong> If selected, material + hearth groups are reduced to the top 3 per group by Stage 1 severity.</p>
+      <p><strong>Stage 3:</strong> Climate prioritization ranks remaining municipalities globally and keeps the top share.</p>
       <div class="flow-toggle-list">
-        <label><input type="checkbox" data-stage-toggle="material"${materialChecked}> Apply Stage 2 (Material filter)</label>
-        <label><input type="checkbox" data-stage-toggle="hearth"${hearthChecked}> Apply Stage 3 (Hearth filter)</label>
-        <label><input type="checkbox" data-stage-toggle="climate"${climateChecked}> Apply Stage 4 (Climate prioritization)</label>
+        <label><input type="checkbox" data-stage-toggle="material-hearth"${comboChecked}> Apply Stage 2 (Material + Hearth top-3)</label>
+        <label><input type="checkbox" data-stage-toggle="climate"${climateChecked}> Apply Stage 3 (Climate prioritization)</label>
       </div>
     </div>
   `;
@@ -2998,113 +4499,11 @@ function collectExceptionalRows() {
     });
 }
 
-function exceptionalGroupingMode() {
-  const materialOn = !!state.applyMaterialFilter;
-  const hearthOn = !!state.applyHearthFilter;
-  if (materialOn && hearthOn) return "material_hearth";
-  if (materialOn) return "material";
-  if (hearthOn) return "hearth";
-  return "all";
-}
-
 function groupedExceptionalRows() {
   const rows = collectExceptionalRows();
-  const mode = exceptionalGroupingMode();
   if (!rows.length) return [];
 
-  if (mode === "all") {
-    return [
-      {
-        key: "all",
-        title: "All Stage 1 Exceptional Places",
-        rows: sortExceptionalRows(rows),
-      },
-    ];
-  }
-
   const groupsByKey = new Map();
-  if (mode === "material") {
-    rows.forEach((row) => {
-      const key = row.zoneNumber === null ? "zone-missing" : `zone-${row.zoneNumber}`;
-      if (!groupsByKey.has(key)) {
-        groupsByKey.set(key, {
-          key,
-          zoneNumber: row.zoneNumber,
-          title: row.zoneNumber === null ? "Unspecified Zone" : `${row.zoneLabel} (${row.zoneNumber})`,
-          rows: [],
-        });
-      }
-      groupsByKey.get(key).rows.push(row);
-    });
-
-    const orderedZoneNumbers = (state.buildingMaterialZoneOptions || [])
-      .map((opt) => normalizeMaterialZoneNumber(opt.zone_number))
-      .filter((v) => v !== null);
-
-    const groups = [];
-    const seen = new Set();
-    orderedZoneNumbers.forEach((zoneNumber) => {
-      const key = `zone-${zoneNumber}`;
-      const group = groupsByKey.get(key);
-      if (!group) return;
-      group.rows = sortExceptionalRows(group.rows);
-      groups.push(group);
-      seen.add(key);
-    });
-
-    [...groupsByKey.keys()]
-      .filter((key) => !seen.has(key))
-      .sort((a, b) => a.localeCompare(b))
-      .forEach((key) => {
-        const group = groupsByKey.get(key);
-        if (!group) return;
-        group.rows = sortExceptionalRows(group.rows);
-        groups.push(group);
-      });
-    return groups;
-  }
-
-  if (mode === "hearth") {
-    rows.forEach((row) => {
-      const hearth = hearthZoneLabel(row.hearthSystemZone);
-      const key = hearth ? `hearth-${hearth}` : "hearth-missing";
-      if (!groupsByKey.has(key)) {
-        groupsByKey.set(key, {
-          key,
-          hearth,
-          title: hearth || "Unspecified Hearth",
-          rows: [],
-        });
-      }
-      groupsByKey.get(key).rows.push(row);
-    });
-
-    const orderedHearth = _uniqueLabels(state.hearthSystemZoneOptions || []);
-    const groups = [];
-    const seen = new Set();
-    orderedHearth.forEach((label) => {
-      const hearth = hearthZoneLabel(label);
-      const key = `hearth-${hearth}`;
-      const group = groupsByKey.get(key);
-      if (!group) return;
-      group.rows = sortExceptionalRows(group.rows);
-      groups.push(group);
-      seen.add(key);
-    });
-
-    [...groupsByKey.keys()]
-      .filter((key) => !seen.has(key))
-      .sort((a, b) => a.localeCompare(b))
-      .forEach((key) => {
-        const group = groupsByKey.get(key);
-        if (!group) return;
-        group.rows = sortExceptionalRows(group.rows);
-        groups.push(group);
-      });
-    return groups;
-  }
-
-  // material_hearth mode
   rows.forEach((row) => {
     const zonePart = row.zoneNumber === null ? "zone-missing" : `zone-${row.zoneNumber}`;
     const hearth = hearthZoneLabel(row.hearthSystemZone);
@@ -3256,13 +4655,9 @@ function renderLayerStacks() {
   if (municipalityOptionsBodyNode) {
     state.municipalityOptionsScrollTop = municipalityOptionsBodyNode.scrollTop;
   }
-  const materialZoneScrollNode = el.hoverPillRow.querySelector("[data-material-zone-scroll]");
-  if (materialZoneScrollNode) {
-    state.materialZoneScrollTop = materialZoneScrollNode.scrollTop;
-  }
-  const hearthZoneScrollNode = el.hoverPillRow.querySelector("[data-hearth-zone-scroll]");
-  if (hearthZoneScrollNode) {
-    state.hearthZoneScrollTop = hearthZoneScrollNode.scrollTop;
+  const materialHearthZoneScrollNode = el.hoverPillRow.querySelector("[data-material-hearth-zone-scroll]");
+  if (materialHearthZoneScrollNode) {
+    state.materialHearthZoneScrollTop = materialHearthZoneScrollNode.scrollTop;
   }
   [...el.hoverPillRow.querySelectorAll("[data-layer-legend]")].forEach((node) => {
     const layerId = String(node.dataset.layerLegend || "").trim();
@@ -3453,39 +4848,20 @@ function renderLayerStacks() {
     });
   });
 
-  [...el.hoverPillRow.querySelectorAll("input[data-material-zone]")].forEach((node) => {
+  [...el.hoverPillRow.querySelectorAll("input[data-material-hearth-zone]")].forEach((node) => {
     node.addEventListener("change", () => {
-      const zone = normalizeMaterialZoneNumber(node.dataset.materialZone);
-      if (zone === null) return;
-      if (node.checked) state.selectedBuildingMaterialZones.add(zone);
-      else state.selectedBuildingMaterialZones.delete(zone);
+      const code = String(node.dataset.materialHearthZone || "").trim();
+      if (!code) return;
+      if (node.checked) state.selectedMaterialHearthZones.add(code);
+      else state.selectedMaterialHearthZones.delete(code);
       renderLayerStacks();
       if (el.autoUpdate.checked) debounce(() => recompute(false), 350);
     });
   });
 
-  [...el.hoverPillRow.querySelectorAll("button[data-clear-material-zones]")].forEach((node) => {
+  [...el.hoverPillRow.querySelectorAll("button[data-clear-material-hearth-zones]")].forEach((node) => {
     node.addEventListener("click", () => {
-      state.selectedBuildingMaterialZones = new Set();
-      renderLayerStacks();
-      if (el.autoUpdate.checked) debounce(() => recompute(false), 350);
-    });
-  });
-
-  [...el.hoverPillRow.querySelectorAll("input[data-hearth-zone]")].forEach((node) => {
-    node.addEventListener("change", () => {
-      const label = String(node.dataset.hearthZone || "").trim();
-      if (!label) return;
-      if (node.checked) state.selectedHearthSystemZones.add(label);
-      else state.selectedHearthSystemZones.delete(label);
-      renderLayerStacks();
-      if (el.autoUpdate.checked) debounce(() => recompute(false), 350);
-    });
-  });
-
-  [...el.hoverPillRow.querySelectorAll("button[data-clear-hearth-zones]")].forEach((node) => {
-    node.addEventListener("click", () => {
-      state.selectedHearthSystemZones = new Set();
+      state.selectedMaterialHearthZones = new Set();
       renderLayerStacks();
       if (el.autoUpdate.checked) debounce(() => recompute(false), 350);
     });
@@ -3528,8 +4904,7 @@ function renderLayerStacks() {
   [...el.hoverPillRow.querySelectorAll("input[data-stage-toggle]")].forEach((node) => {
     node.addEventListener("change", () => {
       const stage = String(node.dataset.stageToggle || "").trim();
-      if (stage === "material") state.applyMaterialFilter = !!node.checked;
-      if (stage === "hearth") state.applyHearthFilter = !!node.checked;
+      if (stage === "material-hearth") state.applyMaterialHearthFilter = !!node.checked;
       if (stage === "climate") state.applyClimatePriority = !!node.checked;
       renderLayerStacks();
       if (el.autoUpdate.checked) debounce(() => recompute(false), 350);
@@ -3610,13 +4985,9 @@ function renderLayerStacks() {
   if (restoredMunicipalityOptionsBodyNode && state.municipalityOptionsScrollTop > 0) {
     restoredMunicipalityOptionsBodyNode.scrollTop = state.municipalityOptionsScrollTop;
   }
-  const restoredMaterialZoneScrollNode = el.hoverPillRow.querySelector("[data-material-zone-scroll]");
-  if (restoredMaterialZoneScrollNode && state.materialZoneScrollTop > 0) {
-    restoredMaterialZoneScrollNode.scrollTop = state.materialZoneScrollTop;
-  }
-  const restoredHearthZoneScrollNode = el.hoverPillRow.querySelector("[data-hearth-zone-scroll]");
-  if (restoredHearthZoneScrollNode && state.hearthZoneScrollTop > 0) {
-    restoredHearthZoneScrollNode.scrollTop = state.hearthZoneScrollTop;
+  const restoredMaterialHearthZoneScrollNode = el.hoverPillRow.querySelector("[data-material-hearth-zone-scroll]");
+  if (restoredMaterialHearthZoneScrollNode && state.materialHearthZoneScrollTop > 0) {
+    restoredMaterialHearthZoneScrollNode.scrollTop = state.materialHearthZoneScrollTop;
   }
   syncTopRowNav();
 }
@@ -4714,45 +6085,44 @@ async function recompute(isInitial = false, rethrowOnError = false) {
     const e = state.exceptional.size;
     const stage1 = state.exceptionalStage1.size;
     const stage1BaseExceptional = Number(state.lastClimateStats.stage1_exceptional_count ?? stage1);
-    const stage2MaterialFiltered = Number(
-      state.lastClimateStats.stage2_material_filtered_count
-      ?? state.lastClimateStats.stage1_material_filtered_count
+    const stage2ComboFiltered = Number(
+      state.lastClimateStats.stage2_combo_filtered_count
+      ?? state.lastClimateStats.stage2_material_filtered_count
       ?? stage1,
     );
-    const stage3HearthFiltered = Number(state.lastClimateStats.stage3_hearth_filtered_count ?? stage1);
     const stage1CandidateAfterFilter = Number(state.lastClimateStats.stage1_candidate_record_count_after_filter ?? n);
     const stage1CandidateExcluded = Number(state.lastClimateStats.stage1_candidate_record_excluded_count ?? 0);
     const hasStage1ClassExclusion = stage1CandidateExcluded > 0;
-    const stage2FilterEnabled = !!state.lastClimateStats.stage2_material_filter_enabled;
-    const stage3FilterEnabled = !!state.lastClimateStats.stage3_hearth_filter_enabled;
+    const stage2FilterEnabled = !!(
+      state.lastClimateStats.stage2_combo_filter_enabled
+      ?? state.lastClimateStats.stage2_material_filter_enabled
+    );
     const stage4PriorityEnabled = !!state.lastClimateStats.stage4_climate_priority_enabled;
-    if (Object.prototype.hasOwnProperty.call(state.lastClimateStats, "apply_material_filter")) {
-      state.applyMaterialFilter = !!state.lastClimateStats.apply_material_filter;
-    }
-    if (Object.prototype.hasOwnProperty.call(state.lastClimateStats, "apply_hearth_filter")) {
-      state.applyHearthFilter = !!state.lastClimateStats.apply_hearth_filter;
+    if (Object.prototype.hasOwnProperty.call(state.lastClimateStats, "apply_material_hearth_filter")) {
+      state.applyMaterialHearthFilter = !!state.lastClimateStats.apply_material_hearth_filter;
+    } else if (Object.prototype.hasOwnProperty.call(state.lastClimateStats, "apply_material_filter")) {
+      state.applyMaterialHearthFilter = !!state.lastClimateStats.apply_material_filter;
     }
     if (Object.prototype.hasOwnProperty.call(state.lastClimateStats, "apply_climate_priority")) {
       state.applyClimatePriority = !!state.lastClimateStats.apply_climate_priority;
     }
 
     let prefix = "";
-    if (stage2FilterEnabled && stage3FilterEnabled) {
-      prefix = `${n} municipalities, ${stage2MaterialFiltered} exceptional after material-zone filter (from ${stage1BaseExceptional}), ${stage3HearthFiltered} after hearth filter`;
-    } else if (stage3FilterEnabled) {
-      prefix = `${n} municipalities, ${stage3HearthFiltered} exceptional after hearth filter (from ${stage1BaseExceptional})`;
-    } else if (stage2FilterEnabled) {
-      prefix = `${n} municipalities, ${stage2MaterialFiltered} exceptional after material-zone filter (from ${stage1BaseExceptional})`;
+    if (stage2FilterEnabled) {
+      prefix = `${n} municipalities, ${stage2ComboFiltered} exceptional after material + hearth top-3 (from ${stage1BaseExceptional})`;
     } else if (hasStage1ClassExclusion) {
       prefix = `${n} municipalities, ${stage1} exceptional from ${stage1CandidateAfterFilter} class-filtered candidates`;
     } else {
-      prefix = `${n} municipalities, ${stage1} exceptional after municipality featured filter`;
+      prefix = `${n} municipalities, ${stage1} exceptional after bivariate class filter`;
     }
 
     if (stage4PriorityEnabled) {
-      setStatus(`${prefix}, ${e} hearth-wise climate-priority`);
+      setStatus(`${prefix}, ${e} climate-priority`);
     } else {
       setStatus(prefix);
+    }
+    if (state.compareModalOpen) {
+      renderCompareModal();
     }
   } catch (err) {
     setStatus(`Error: ${err.message}`);
@@ -4863,10 +6233,22 @@ async function boot() {
           }))
           .filter((item) => item.zone_number !== null)
       : [];
-    state.selectedBuildingMaterialZones = new Set(
-      _uniqueNumbers(defaults.selected_building_material_zone_numbers || [])
-        .map((v) => normalizeMaterialZoneNumber(v))
-        .filter((v) => v !== null),
+    state.materialHearthZoneOptions = Array.isArray(options.material_hearth_zone_options)
+      ? _uniqueLabels(
+          options.material_hearth_zone_options.map((item) => {
+            if (typeof item === "string") return item;
+            return item?.zone_code;
+          }),
+        ).map((zoneCode) => ({ zone_code: zoneCode }))
+      : [];
+    const availableMaterialHearthCodes = new Set(
+      state.materialHearthZoneOptions
+        .map((item) => String(item.zone_code || "").trim())
+        .filter(Boolean),
+    );
+    state.selectedMaterialHearthZones = new Set(
+      _uniqueLabels(defaults.selected_material_hearth_zones || [])
+        .filter((code) => availableMaterialHearthCodes.has(code)),
     );
     state.hearthSystemZoneOptions = Array.isArray(options.hearth_system_zone_options)
       ? _uniqueLabels(
@@ -4876,11 +6258,11 @@ async function boot() {
           }),
         )
       : [];
-    state.selectedHearthSystemZones = new Set(
-      _uniqueLabels(defaults.selected_hearth_system_zones || []),
-    );
-    state.applyMaterialFilter = defaults.apply_material_filter !== false;
-    state.applyHearthFilter = defaults.apply_hearth_filter !== false;
+    if (Object.prototype.hasOwnProperty.call(defaults, "apply_material_hearth_filter")) {
+      state.applyMaterialHearthFilter = defaults.apply_material_hearth_filter !== false;
+    } else {
+      state.applyMaterialHearthFilter = defaults.apply_material_filter !== false;
+    }
     state.applyClimatePriority = defaults.apply_climate_priority !== false;
     buildMaterialZoneColorMap();
     buildHearthZoneColorMap();
@@ -4913,6 +6295,8 @@ async function boot() {
     applyLayerOrderAndVisibility();
     wireAutoUpdateEvents();
     wireMunicipalityModalEvents();
+    wireCompareModalEvents();
+    renderCompareLauncher();
 
     setLoaderStage("Computing municipality featured classes", "Calculating initial map values ...");
     await recompute(true, true);

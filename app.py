@@ -23,7 +23,7 @@ from services.compute import (
     compute_bivariate_records,
     compute_exceptional_ids,
     filter_records_by_bivariate_class,
-    select_exceptional_ids_by_climate_risk_share_per_group,
+    select_exceptional_ids_by_climate_risk_share,
     select_top_n_by_group,
 )
 from services.data_store import DataStore
@@ -203,6 +203,24 @@ def _parse_zone_number(value) -> int | None:
         return None
 
 
+def _normalize_label(value) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _material_hearth_code_from_meta(meta: dict) -> str:
+    combo = _normalize_label(meta.get("material+hearth_zone"))
+    if combo:
+        return combo
+    zone = _parse_zone_number(meta.get("building_material_zone_number"))
+    hearth_code = _normalize_label(meta.get("hearth_system_zone_number")).upper()
+    if len(hearth_code) != 1 or not hearth_code.isalpha():
+        hearth_code = "U"
+    left = str(zone) if zone is not None else "U"
+    return f"{left}_{hearth_code}"
+
+
 @app.route("/")
 def index():
     return render_template("index.html")
@@ -373,20 +391,16 @@ def api_recompute():
         seen_excluded.add(bi_class)
         excluded_bivariate_classes.append(bi_class)
 
-    selected_material_zone_numbers = _parse_int_list(
-        body.get("selected_building_material_zone_numbers", []),
+    selected_material_hearth_zones = _parse_label_list(
+        body.get("selected_material_hearth_zones", []),
     )
-    selected_hearth_system_zones = _parse_label_list(
-        body.get("selected_hearth_system_zones", []),
-    )
-    apply_material_filter = _parse_bool(body.get("apply_material_filter", True), True)
-    apply_hearth_filter = _parse_bool(body.get("apply_hearth_filter", True), True)
+    apply_material_hearth_filter = _parse_bool(body.get("apply_material_hearth_filter", True), True)
     apply_climate_priority = _parse_bool(body.get("apply_climate_priority", True), True)
-    if store.hearth_system_zone_values:
-        selected_hearth_system_zones = [
-            label
-            for label in selected_hearth_system_zones
-            if label in store.hearth_system_zone_values
+    if store.material_hearth_zone_values:
+        selected_material_hearth_zones = [
+            code
+            for code in selected_material_hearth_zones
+            if code in store.material_hearth_zone_values
         ]
 
     temp_by_bfs = store.get_temperature(season, temp_method, exclude_non_habitable)
@@ -411,58 +425,31 @@ def api_recompute():
         temp_extreme=temp_extreme,
     )
 
-    material_top_n = 3
-    hearth_top_n = 3
+    combo_top_n = 3
 
-    selected_material_zone_set = set(selected_material_zone_numbers)
-    material_filter_active = bool(apply_material_filter)
+    selected_material_hearth_zone_set = set(selected_material_hearth_zones)
+    combo_filter_active = bool(apply_material_hearth_filter)
     stage2_stats: dict[str, object] = {
-        "top_n_per_group": int(material_top_n),
+        "top_n_per_group": int(combo_top_n),
         "group_counts": [],
         "input_count": int(len(stage1_exceptional_ids)),
         "eligible_count": int(len(stage1_exceptional_ids)),
         "selected_count": int(len(stage1_exceptional_ids)),
     }
-    if material_filter_active:
-        material_group_by_bfs: dict[str, int | None] = {}
+    if combo_filter_active:
+        material_hearth_group_by_bfs: dict[str, str] = {}
         for bfs in stage1_exceptional_ids:
-            zone_num = store.metadata_by_bfs.get(str(bfs), {}).get("building_material_zone_number")
-            material_group_by_bfs[str(bfs)] = _parse_zone_number(zone_num)
+            meta = store.metadata_by_bfs.get(str(bfs), {})
+            material_hearth_group_by_bfs[str(bfs)] = _material_hearth_code_from_meta(meta)
         stage1_exceptional_ids, stage2_stats = select_top_n_by_group(
             stage1_exceptional_ids,
-            material_group_by_bfs,
+            material_hearth_group_by_bfs,
             stage1_severity_scores,
-            top_n=material_top_n,
-            selected_groups=selected_material_zone_set if selected_material_zone_set else None,
-            group_field_name="building_material_zone_number",
+            top_n=combo_top_n,
+            selected_groups=selected_material_hearth_zone_set if selected_material_hearth_zone_set else None,
+            group_field_name="material_hearth_zone",
         )
-    stage2_material_filtered_count = int(len(stage1_exceptional_ids))
-
-    selected_hearth_zone_set = set(selected_hearth_system_zones)
-    hearth_filter_active = bool(apply_hearth_filter)
-    stage3_stats: dict[str, object] = {
-        "top_n_per_group": int(hearth_top_n),
-        "group_counts": [],
-        "input_count": int(len(stage1_exceptional_ids)),
-        "eligible_count": int(len(stage1_exceptional_ids)),
-        "selected_count": int(len(stage1_exceptional_ids)),
-    }
-    if hearth_filter_active:
-        hearth_group_by_bfs: dict[str, str | None] = {}
-        for bfs in stage1_exceptional_ids:
-            hearth_label = str(
-                store.metadata_by_bfs.get(str(bfs), {}).get("hearth_system_zone") or ""
-            ).strip()
-            hearth_group_by_bfs[str(bfs)] = hearth_label if hearth_label else None
-        stage1_exceptional_ids, stage3_stats = select_top_n_by_group(
-            stage1_exceptional_ids,
-            hearth_group_by_bfs,
-            stage1_severity_scores,
-            top_n=hearth_top_n,
-            selected_groups=selected_hearth_zone_set if selected_hearth_zone_set else None,
-            group_field_name="hearth_system_zone",
-        )
-    stage3_hearth_filtered_count = int(len(stage1_exceptional_ids))
+    stage2_combo_filtered_count = int(len(stage1_exceptional_ids))
 
     climate_scores, climate_meta = compute_dynamic_climate_risk_scores(
         store.climate_indicator_frame,
@@ -474,27 +461,21 @@ def api_recompute():
         if np.isfinite(score)
     }
 
-    hearth_zone_by_bfs: dict[str, str | None] = {}
-    for bfs, meta in store.metadata_by_bfs.items():
-        hearth_zone_raw = meta.get("hearth_system_zone")
-        hearth_zone_val = str(hearth_zone_raw).strip() if hearth_zone_raw is not None else ""
-        hearth_zone_by_bfs[str(bfs)] = hearth_zone_val or None
-
     climate_priority_active = bool(apply_climate_priority and climate_meta["climate_stage_enabled"])
     if climate_priority_active:
-        exceptional_ids, climate_stage_status, climate_stats = select_exceptional_ids_by_climate_risk_share_per_group(
+        exceptional_ids, climate_stage_status, climate_stats = select_exceptional_ids_by_climate_risk_share(
             stage1_exceptional_ids,
             climate_scores_by_bfs,
             climate_top_share_pct,
-            hearth_zone_by_bfs,
-            scope_name="per_hearth_system_zone",
-            group_field_name="hearth_system_zone",
         )
+        climate_stats["climate_selection_scope"] = "global"
+        climate_stats["climate_stage_group_counts"] = []
+        climate_stats["climate_stage_group_count"] = 0
     else:
         exceptional_ids = list(stage1_exceptional_ids)
         climate_stage_status = {str(bfs): "selected" for bfs in stage1_exceptional_ids}
         climate_stats = {
-            "climate_selection_scope": "per_hearth_system_zone",
+            "climate_selection_scope": "global",
             "climate_top_share_pct": float(climate_top_share_pct),
             "climate_stage_input_count": int(len(stage1_exceptional_ids)),
             "climate_stage_valid_count": 0,
@@ -528,25 +509,23 @@ def api_recompute():
                 "temp_cutoff": stats.temp_cutoff,
                 "old_cutoff": stats.old_cutoff,
                 "climate_stage_enabled": bool(climate_priority_active),
-                "apply_material_filter": bool(apply_material_filter),
-                "apply_hearth_filter": bool(apply_hearth_filter),
+                "apply_material_hearth_filter": bool(apply_material_hearth_filter),
                 "apply_climate_priority": bool(apply_climate_priority),
-                "stage2_material_filter_enabled": bool(material_filter_active),
-                "stage3_hearth_filter_enabled": bool(hearth_filter_active),
+                "stage2_combo_filter_enabled": bool(combo_filter_active),
                 "stage4_climate_priority_enabled": bool(climate_priority_active),
-                "stage2_reduction_mode": "top_n_per_group" if material_filter_active else "bypass",
-                "stage2_top_n_per_group": int(material_top_n if material_filter_active else 0),
+                "stage2_reduction_mode": "top_n_per_group" if combo_filter_active else "bypass",
+                "stage2_top_n_per_group": int(combo_top_n if combo_filter_active else 0),
                 "stage2_group_counts": stage2_stats.get("group_counts", []),
                 "stage2_group_count": int(len(stage2_stats.get("group_counts", []))),
-                "stage3_reduction_mode": "top_n_per_group" if hearth_filter_active else "bypass",
-                "stage3_top_n_per_group": int(hearth_top_n if hearth_filter_active else 0),
-                "stage3_group_counts": stage3_stats.get("group_counts", []),
-                "stage3_group_count": int(len(stage3_stats.get("group_counts", []))),
+                "stage2_combo_reduction_mode": "top_n_per_group" if combo_filter_active else "bypass",
+                "stage2_combo_top_n_per_group": int(combo_top_n if combo_filter_active else 0),
+                "stage2_combo_group_counts": stage2_stats.get("group_counts", []),
+                "stage2_combo_group_count": int(len(stage2_stats.get("group_counts", []))),
                 "climate_top_share_pct": float(climate_top_share_pct),
                 "climate_indicator_count": int(climate_meta["usable_indicator_count"]),
                 "climate_indicator_keys": climate_indicator_keys,
                 "climate_ignored_indicators": climate_meta["climate_ignored_indicators"],
-                "climate_selection_scope": str(climate_stats.get("climate_selection_scope", "per_hearth_system_zone")),
+                "climate_selection_scope": str(climate_stats.get("climate_selection_scope", "global")),
                 "climate_stage_group_counts": climate_stats.get("climate_stage_group_counts", []),
                 "climate_stage_group_count": int(climate_stats.get("climate_stage_group_count", 0)),
                 # Backward compatibility aliases (kept for one transition cycle).
@@ -556,18 +535,29 @@ def api_recompute():
                 "stage1_candidate_record_count_before_filter": int(stage1_class_stats["stage1_candidate_record_count_before_filter"]),
                 "stage1_candidate_record_count_after_filter": int(stage1_class_stats["stage1_candidate_record_count_after_filter"]),
                 "stage1_candidate_record_excluded_count": int(stage1_class_stats["stage1_candidate_record_excluded_count"]),
-                "selected_building_material_zone_numbers": selected_material_zone_numbers,
-                "selected_hearth_system_zones": selected_hearth_system_zones,
+                "selected_material_hearth_zones": selected_material_hearth_zones,
                 "stage1_exceptional_count": int(stage1_base_exceptional_count),
-                "stage2_material_filtered_count": int(stage2_material_filtered_count),
-                "stage3_hearth_filtered_count": int(stage3_hearth_filtered_count),
-                "stage1_material_filtered_count": int(stage2_material_filtered_count),
+                "stage2_combo_filtered_count": int(stage2_combo_filtered_count),
                 "stage2_exceptional_count": int(len(exceptional_ids)),
                 "stage4_exceptional_count": int(len(exceptional_ids)),
                 "climate_stage_input_count": int(climate_stats["climate_stage_input_count"]),
                 "climate_stage_valid_count": int(climate_stats["climate_stage_valid_count"]),
                 "climate_stage_output_count": int(climate_stats["climate_stage_output_count"]),
                 "climate_missing_excluded": int(climate_stats["climate_missing_excluded"]),
+                # Backward compatibility aliases (kept for one transition cycle).
+                "apply_material_filter": bool(apply_material_hearth_filter),
+                "apply_hearth_filter": False,
+                "stage2_material_filter_enabled": bool(combo_filter_active),
+                "stage3_hearth_filter_enabled": False,
+                "stage3_reduction_mode": "bypass",
+                "stage3_top_n_per_group": 0,
+                "stage3_group_counts": [],
+                "stage3_group_count": 0,
+                "selected_building_material_zone_numbers": [],
+                "selected_hearth_system_zones": [],
+                "stage2_material_filtered_count": int(stage2_combo_filtered_count),
+                "stage3_hearth_filtered_count": int(stage2_combo_filtered_count),
+                "stage1_material_filtered_count": int(stage2_combo_filtered_count),
             },
         }
     )
