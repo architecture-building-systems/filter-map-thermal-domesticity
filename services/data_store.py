@@ -141,6 +141,7 @@ class DataStore:
         self.snapshot_statpop: pd.DataFrame = pd.DataFrame()
         self.snapshot_bds: pd.DataFrame = pd.DataFrame()
         self.snapshot_sls_composition: pd.DataFrame = pd.DataFrame()
+        self.snapshot_statent: pd.DataFrame = pd.DataFrame()
         self.snapshot_canton_means: dict[str, dict[str, float]] = {}
         self.snapshot_swiss_means: dict[str, float] = {}
 
@@ -441,8 +442,18 @@ class DataStore:
         else:
             gdf["KANTONSNUM"] = np.nan
 
+        # Pre-compute WGS84 centroids for all municipalities (used for EPW station matching).
+        # Centroid is computed in the source projected CRS (EPSG:2056) to avoid geographic-CRS
+        # distortion warnings, then the centroid points are reprojected to WGS84.
+        try:
+            centroids_proj = gdf.geometry.centroid          # accurate in projected CRS
+            centroids_gs = gpd.GeoSeries(centroids_proj, crs=gdf.crs)
+            centroids_wgs84 = centroids_gs.to_crs("EPSG:4326")
+        except Exception:
+            centroids_wgs84 = None
+
         # Base profile data and area cache.
-        for _, row in gdf.iterrows():
+        for i, (_, row) in enumerate(gdf.iterrows()):
             bfs = str(int(row["BFS_NUMMER"]))
             rec = {
                 "bfs": bfs,
@@ -477,6 +488,15 @@ class DataStore:
                 area_sq_km = float(max(0.0, geom.area) / 1_000_000.0)
                 self.profile_area_sq_km_by_bfs[bfs] = area_sq_km
                 rec["area_sq_km"] = area_sq_km
+
+            if centroids_wgs84 is not None:
+                try:
+                    c = centroids_wgs84.iloc[i]
+                    if c is not None and not c.is_empty:
+                        rec["centroid_lat"] = round(float(c.y), 6)
+                        rec["centroid_lon"] = round(float(c.x), 6)
+                except Exception:
+                    pass
 
             self.profile_base_by_bfs[bfs] = rec
 
@@ -554,6 +574,16 @@ class DataStore:
     _SNAPSHOT_BBM_KEYS = [f"BBM{str(i).zfill(2)}" for i in range(1, 20)]
     _SNAPSHOT_BBW_KEYS = [f"BBW{str(i).zfill(2)}" for i in range(1, 20)]
 
+    _SNAPSHOT_HP_KEYS   = ["HP01", "HP02", "HP03", "HP04", "HP05", "HP06"]
+    _SNAPSHOT_HP_LABELS = {
+        "HP01": "1 person",
+        "HP02": "2 persons",
+        "HP03": "3 persons",
+        "HP04": "4 persons",
+        "HP05": "5 persons",
+        "HP06": "6+ persons",
+    }
+
     _SNAPSHOT_ORIGIN_KEYS = ["BB21", "BB27", "BB28", "BB29", "BB30"]
     _SNAPSHOT_ORIGIN_LABELS = {
         "BB21": "Born in Switzerland",
@@ -603,6 +633,7 @@ class DataStore:
         self.snapshot_statpop = _load("statpop")
         self.snapshot_bds = _load("bds")
         self.snapshot_sls_composition = _load("sls_composition")
+        self.snapshot_statent = _load("statent")
 
         canton_means_path = swiss_stats_cache / "canton_means.json"
         swiss_means_path = swiss_stats_cache / "swiss_means.json"
@@ -614,10 +645,11 @@ class DataStore:
                 self.snapshot_swiss_means = json.load(f)
 
         logger.info(
-            "Snapshot caches loaded: statpop=%d, bds=%d, sls_comp=%d, cantons=%d, swiss_vars=%d",
+            "Snapshot caches loaded: statpop=%d, bds=%d, sls_comp=%d, statent=%d, cantons=%d, swiss_vars=%d",
             len(self.snapshot_statpop),
             len(self.snapshot_bds),
             len(self.snapshot_sls_composition),
+            len(self.snapshot_statent),
             len(self.snapshot_canton_means),
             len(self.snapshot_swiss_means),
         )
@@ -724,6 +756,7 @@ class DataStore:
         sp_row = self.snapshot_statpop.loc[key] if key in self.snapshot_statpop.index else None
         bds_row = self.snapshot_bds.loc[key] if key in self.snapshot_bds.index else None
         sls_row = self.snapshot_sls_composition.loc[key] if key in self.snapshot_sls_composition.index else None
+        se_row = self.snapshot_statent.loc[key] if key in self.snapshot_statent.index else None
 
         canton_means = self.snapshot_canton_means.get(canton_key, {})
         swiss_means = self.snapshot_swiss_means
@@ -798,6 +831,31 @@ class DataStore:
             "swiss_mean": self._snap_composition_mean_items(swiss_means, "AS18_17", as17_labels),
         }
 
+        # Employment by sector (STATENT)
+        _SECTOR_LABELS = ["Agriculture", "Industry", "Services"]
+        _SECTOR_F_KEYS = ["B08EMPFS1", "B08EMPFS2", "B08EMPFS3"]
+        _SECTOR_M_KEYS = ["B08EMPMS1", "B08EMPMS2", "B08EMPMS3"]
+        sector_female = [int(round(_safe_float(se_row.get(k), 0.0) or 0.0)) for k in _SECTOR_F_KEYS] if se_row is not None else []
+        sector_male = [int(round(_safe_float(se_row.get(k), 0.0) or 0.0)) for k in _SECTOR_M_KEYS] if se_row is not None else []
+        employment_by_sector: dict = {
+            "sectors": _SECTOR_LABELS,
+            "female": sector_female,
+            "male": sector_male,
+            "items": [
+                {"code": f"S{i+1}", "label": lbl, "value": (sector_female[i] + sector_male[i] if sector_female and sector_male else 0)}
+                for i, lbl in enumerate(_SECTOR_LABELS)
+            ] if sector_female else [],
+        }
+
+        # Private households by size (STATPOP HP01–HP06)
+        hp_total = float(sum(_safe_float(sp_row.get(k), 0.0) or 0.0 for k in self._SNAPSHOT_HP_KEYS)) if sp_row is not None else 0.0
+        private_households = {
+            "labels": [self._SNAPSHOT_HP_LABELS[k] for k in self._SNAPSHOT_HP_KEYS],
+            "items": self._snap_items(sp_row, self._SNAPSHOT_HP_KEYS, self._SNAPSHOT_HP_LABELS, hp_total) if sp_row is not None else [],
+            "canton_mean": self._snap_mean_items(canton_means, "statpop__", self._SNAPSHOT_HP_KEYS, self._SNAPSHOT_HP_LABELS),
+            "swiss_mean": self._snap_mean_items(swiss_means, "statpop__", self._SNAPSHOT_HP_KEYS, self._SNAPSHOT_HP_LABELS),
+        }
+
         return {
             "swiss_ratio": swiss_ratio,
             "origin": {
@@ -811,6 +869,8 @@ class DataStore:
             "heat_generator": heat_generator,
             "land_use_10": land_use_10,
             "area_stats_17": area_stats_17,
+            "employment_by_sector": employment_by_sector,
+            "private_households": private_households,
         }
 
     def get_municipality_profile(self, bfs: str | int) -> dict | None:
@@ -962,6 +1022,8 @@ class DataStore:
                     float(inhabited_area) if inhabited_area is not None and np.isfinite(inhabited_area) else None
                 ),
                 "population_coverage_pct": _safe_profile_value(row.get("population_coverage_pct")),
+                "centroid_lat": base.get("centroid_lat"),
+                "centroid_lon": base.get("centroid_lon"),
             },
             "analysis_note": (
                 "Profile uses cached municipality attributes and benchmark summaries. "

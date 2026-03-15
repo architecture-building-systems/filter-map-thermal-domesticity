@@ -919,10 +919,12 @@ function renderStackedBarChart(canvasId, cohorts, maleValues, femaleValues) {
       },
       scales: {
         x: {
+          stacked: true,
           grid: { color: "#f0f0f0" },
           ticks: { font: { family: _chartFontFamily, size: 11 } },
         },
         y: {
+          stacked: true,
           grid: { display: false },
           ticks: { font: { family: _chartFontFamily, size: 11 } },
         },
@@ -943,7 +945,9 @@ const SNAPSHOT_PANELS = [
   { id: "heat_source",         title: "Heat Source",                     subtitle: "Buildings by primary energy source",                    sortMode: "by_label", hideFromOverview: false },
   { id: "heat_generator",      title: "Heat Generator",                  subtitle: "Buildings by heat generation system",                   sortMode: "by_label", hideFromOverview: false },
   { id: "land_use_10",         title: "Land Use (10 Classes)",           subtitle: "Land use composition by 10 major categories (LU18)",    sortMode: null,       hideFromOverview: true  },
-  { id: "area_stats_17",       title: "Area Statistics (17 Classes)",    subtitle: "Area statistics composition by 17 categories (AS18)",   sortMode: null,       hideFromOverview: false },
+  { id: "area_stats_17",          title: "Area Statistics (17 Classes)",    subtitle: "Area statistics composition by 17 categories (AS18)",         sortMode: null,       hideFromOverview: false },
+  { id: "employment_by_sector",   title: "Employment by Sector",            subtitle: "Jobs by economic sector, split by gender (STATENT 2021)",       sortMode: null,       hideFromOverview: false },
+  { id: "private_households",     title: "Private Households",              subtitle: "Number of private households by household size (STATPOP)",       sortMode: null,       hideFromOverview: false },
 ];
 
 function buildSnapshotGalleryHtml(instanceId) {
@@ -1031,7 +1035,10 @@ function renderSnapshotPanel(instanceId, snapshot, index) {
   bodyEl.innerHTML = `<canvas id="${canvasId}"></canvas>`;
 
   const items = Array.isArray(data?.items) ? data.items : [];
-  if (!items.length) {
+  const hasSectorData = panel.id === "employment_by_sector" && (
+    Array.isArray(data?.sectors) && data.sectors.length > 0
+  );
+  if (!items.length && !hasSectorData) {
     bodyEl.innerHTML = `<p class="snapshot-no-data">No data available for this municipality.</p>`;
     return;
   }
@@ -1041,10 +1048,24 @@ function renderSnapshotPanel(instanceId, snapshot, index) {
     const male = Array.isArray(data?.male) ? data.male : items.map((it) => it.value ?? 0);
     const female = Array.isArray(data?.female) ? data.female : [];
     renderStackedBarChart(canvasId, cohorts, male, female);
+  } else if (panel.id === "employment_by_sector") {
+    const sectors = Array.isArray(data?.sectors) ? data.sectors : items.map((it) => it.label || String(it.code));
+    const male = Array.isArray(data?.male) ? data.male : [];
+    const female = Array.isArray(data?.female) ? data.female : [];
+    if (!sectors.length || (!male.length && !female.length)) {
+      bodyEl.innerHTML = `<p class="snapshot-no-data">No employment data available for this municipality.</p>`;
+      return;
+    }
+    renderStackedBarChart(canvasId, sectors, male, female);
   } else if (panel.id === "land_use_10" || panel.id === "area_stats_17") {
     const labels = items.map((it) => it.label || String(it.code));
     const values = items.map((it) => it.value ?? 0);
     renderBarChart(canvasId, labels, values);
+  } else if (panel.id === "private_households") {
+    const orderedLabels = Array.isArray(data?.labels) ? data.labels : items.map((it) => it.label || String(it.code));
+    const labelIndex = Object.fromEntries(items.map((it) => [it.label || String(it.code), it.value ?? 0]));
+    const orderedValues = orderedLabels.map((lbl) => labelIndex[lbl] ?? 0);
+    renderBarChart(canvasId, orderedLabels, orderedValues);
   } else {
     const sorted = _sortSnapshotItems(items, panel.sortMode);
     const labels = sorted.map((it) => it.label || String(it.code));
@@ -1077,8 +1098,12 @@ function wireSnapshotGallery(instanceId, snapshot, initialIndex) {
 function buildMunicipalitySnapshotTab(profile) {
   const snapshot = profile?.snapshot;
   const instanceId = "main";
+  const bfs = profile?.bfs;
   const galleryHtml = buildSnapshotGalleryHtml(instanceId);
-  setTimeout(() => wireSnapshotGallery(instanceId, snapshot, state.snapshotGalleryIndex || 0), 0);
+  setTimeout(() => {
+    wireSnapshotGallery(instanceId, snapshot, state.snapshotGalleryIndex || 0);
+    if (bfs) fetchAndRenderWeatherCharts(bfs);
+  }, 0);
   return `
     <section class="municipality-tab-grid">
       <article class="municipality-card municipality-card--full">
@@ -1087,8 +1112,206 @@ function buildMunicipalitySnapshotTab(profile) {
           ? galleryHtml
           : '<p class="municipality-inline-note">Statistics data is not yet available for this municipality.</p>'}
       </article>
+      <article class="municipality-card municipality-card--full">
+        <h3>Local Weather Profile</h3>
+        <div id="weather-charts-main">
+          <p class="municipality-inline-note">Loading weather data…</p>
+        </div>
+      </article>
     </section>
   `;
+}
+
+// ---------------------------------------------------------------------------
+// Local weather — typical monthly day charts
+// ---------------------------------------------------------------------------
+
+async function fetchAndRenderWeatherCharts(bfs) {
+  const container = document.getElementById("weather-charts-main");
+  if (!container) return;
+  try {
+    const resp = await fetch(`/api/municipality/${encodeURIComponent(bfs)}/weather`);
+    if (!resp.ok) {
+      container.innerHTML = `<p class="municipality-inline-note">Weather data is not available for this municipality.</p>`;
+      return;
+    }
+    const data = await resp.json();
+    if (!data?.variables) {
+      container.innerHTML = `<p class="municipality-inline-note">Weather data is not available for this municipality.</p>`;
+      return;
+    }
+    renderWeatherSection(container, data);
+  } catch (_err) {
+    if (document.getElementById("weather-charts-main") === container) {
+      container.innerHTML = `<p class="municipality-inline-note">Weather data could not be loaded.</p>`;
+    }
+  }
+}
+
+function renderWeatherSection(container, data) {
+  const station = data.station || {};
+  const stationLabel = station.name ? ` — ${escapeHtml(station.name)}` : "";
+  const varKeys = ["temp_air", "ghi", "relative_humidity"];
+  const parts = [];
+  parts.push(`<p class="municipality-inline-note weather-station-note">Nearest EPW station${stationLabel}</p>`);
+  for (const key of varKeys) {
+    const varData = data.variables?.[key];
+    if (!varData) continue;
+    parts.push(`<div class="weather-variable-block">
+      <div class="weather-variable-label">${escapeHtml(varData.label)}</div>
+      <div class="weather-row-wrap">
+        <div class="weather-y-axis" id="weather-yaxis-${escapeHtml(key)}"></div>
+        <div class="weather-monthly-row" id="weather-row-${escapeHtml(key)}"></div>
+      </div>
+    </div>`);
+  }
+  container.innerHTML = parts.join("");
+
+  for (const key of varKeys) {
+    const varData = data.variables?.[key];
+    if (!varData) continue;
+    const rowEl = document.getElementById(`weather-row-${key}`);
+    const yAxisEl = document.getElementById(`weather-yaxis-${key}`);
+    if (!rowEl) continue;
+    renderTypicalMonthlyDayCharts(rowEl, yAxisEl, key, varData);
+  }
+}
+
+function renderTypicalMonthlyDayCharts(rowEl, yAxisEl, varKey, varData) {
+  if (!window.Chart) return;
+  const monthly = varData.monthly || [];
+  if (!monthly.length) return;
+
+  // Fixed y-axis bounds for specific variables; data-driven for others.
+  const Y_FIXED = {
+    ghi:               { min: 0,    max: 1200 },
+    relative_humidity: { min: 0,    max: 100  },
+  };
+
+  let yMin, yMax;
+  if (Y_FIXED[varKey]) {
+    yMin = Y_FIXED[varKey].min;
+    yMax = Y_FIXED[varKey].max;
+  } else {
+    // Compute shared Y domain across all months and all scatter values.
+    yMin = Infinity;
+    yMax = -Infinity;
+    for (const m of monthly) {
+      for (const pts of (m.scatter || [])) {
+        for (const v of pts) {
+          if (v < yMin) yMin = v;
+          if (v > yMax) yMax = v;
+        }
+      }
+      for (const v of (m.medians || [])) {
+        if (v !== null && v < yMin) yMin = v;
+        if (v !== null && v > yMax) yMax = v;
+      }
+    }
+    // Add a small margin.
+    const range = yMax - yMin || 1;
+    yMin = Math.floor(yMin - range * 0.05);
+    yMax = Math.ceil(yMax + range * 0.05);
+  }
+
+  // Remove the HTML Y-axis strip — tick labels are drawn inside the first chart panel.
+  if (yAxisEl) yAxisEl.remove();
+
+  for (let mIdx = 0; mIdx < monthly.length; mIdx++) {
+    const m = monthly[mIdx];
+    const isFirst = mIdx === 0;
+
+    const wrap = document.createElement("div");
+    wrap.className = "weather-month-panel";
+
+    const monthLabel = document.createElement("div");
+    monthLabel.className = "weather-month-label";
+    monthLabel.textContent = m.name;
+    wrap.appendChild(monthLabel);
+
+    const canvas = document.createElement("canvas");
+    const canvasId = `weather-canvas-${varKey}-${mIdx}`;
+    canvas.id = canvasId;
+    wrap.appendChild(canvas);
+    rowEl.appendChild(wrap);
+
+    // Scatter dataset: flatten scatter[hour] → [{x, y}, ...]
+    const scatterPoints = [];
+    const scatter = m.scatter || [];
+    for (let h = 0; h < scatter.length; h++) {
+      for (const v of scatter[h]) {
+        scatterPoints.push({ x: h, y: v });
+      }
+    }
+
+    // Median dataset: [{x: hour, y: median}, ...]
+    const medianPoints = (m.medians || []).map((v, h) => ({ x: h, y: v }));
+
+    _chartInstances[canvasId] = new Chart(canvas, {
+      type: "scatter",
+      data: {
+        datasets: [
+          {
+            label: "Daily values",
+            data: scatterPoints,
+            backgroundColor: varData.colour_scatter,
+            borderWidth: 0,
+            pointRadius: 2,
+            pointHoverRadius: 2,
+          },
+          {
+            label: "Median",
+            data: medianPoints,
+            type: "line",
+            backgroundColor: "transparent",
+            borderColor: varData.colour_line,
+            borderWidth: 1.5,
+            pointRadius: 0,
+            tension: 0.3,
+          },
+        ],
+      },
+      options: {
+        animation: false,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { display: false },
+          tooltip: { enabled: false },
+        },
+        scales: {
+          x: {
+            type: "linear",
+            min: 0,
+            max: 24,
+            grid: { color: "#f0f0f0", drawTicks: false },
+            border: { display: false },
+            ticks: {
+              font: { family: _chartFontFamily, size: 9 },
+              color: "#888",
+              stepSize: 6,
+              callback: (v) => (v === 0 || v === 6 || v === 12 || v === 18 || v === 24) ? String(v) : null,
+            },
+          },
+          y: {
+            min: yMin,
+            max: yMax,
+            grid: { color: "#f0f0f0", drawTicks: false },
+            border: { display: false },
+            ticks: {
+              display: isFirst,
+              font: { family: _chartFontFamily, size: 9 },
+              color: "#888",
+              maxTicksLimit: 5,
+            },
+            // Non-first panels: collapse the Y axis to zero width so all 11 panels
+            // share their full canvas with the plot area.
+            // First panel: natural width calculated by Chart.js from tick labels.
+            ...(isFirst ? {} : { afterFit: (scale) => { scale.width = 0; } }),
+          },
+        },
+      },
+    });
+  }
 }
 
 function municipalityTabMarkup(profile, tabId) {

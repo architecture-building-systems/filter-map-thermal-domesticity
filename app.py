@@ -41,6 +41,7 @@ _json_response_cache: dict[str, tuple[bytes, str, bytes, str]] = {}
 _binary_etag_cache: dict[str, str] = {}
 _load_thread: threading.Thread | None = None
 _load_thread_lock = threading.Lock()
+_weather_cache: dict[str, dict] = {}
 
 
 def _background_load() -> None:
@@ -281,6 +282,40 @@ def api_municipality_profile(bfs: str):
 
     cache_key = f"profile:{payload.get('bfs', str(bfs))}"
     return _cached_json_response(payload, cache_key, cache_control="public, max-age=300")
+
+
+@app.route("/api/municipality/<bfs>/weather")
+def api_municipality_weather(bfs: str):
+    _ensure_background_load_started()
+    if _load_error:
+        return jsonify({"error": _load_error}), 500
+    if not store.ready:
+        return jsonify({"error": "Data store is still loading"}), 503
+
+    from services import epw_service
+
+    parsed_bfs = str(int(bfs)) if bfs.isdigit() else None
+    if parsed_bfs is None:
+        return jsonify({"error": "Invalid BFS identifier"}), 400
+
+    if parsed_bfs in _weather_cache:
+        return jsonify(_weather_cache[parsed_bfs])
+
+    base = store.profile_base_by_bfs.get(parsed_bfs)
+    if base is None:
+        return jsonify({"error": f"Unknown municipality BFS: {bfs}"}), 404
+
+    lat = base.get("centroid_lat")
+    lon = base.get("centroid_lon")
+    if lat is None or lon is None:
+        return jsonify({"error": "Centroid coordinates not available"}), 404
+
+    summary = epw_service.get_weather_summary(lat, lon)
+    if summary is None:
+        return jsonify({"error": "Weather data could not be retrieved"}), 503
+
+    _weather_cache[parsed_bfs] = summary
+    return jsonify(summary)
 
 
 @app.route("/api/recompute", methods=["POST"])
