@@ -35,6 +35,7 @@ const state = {
   compareWeatherErrorByBfs: {},
   compareChartIds: [],
   compareLauncherClickTimer: null,
+  compareDatasetExportBusy: false,
   municipalityDisplayMode: "bivariate",
   buildingMaterialZoneOptions: [],
   materialHearthZoneOptions: [],
@@ -444,6 +445,7 @@ const el = {
   compareModal: document.getElementById("compare-modal"),
   compareModalPanel: document.getElementById("compare-modal-panel"),
   compareModalReport: document.getElementById("compare-modal-report"),
+  compareModalDataset: document.getElementById("compare-modal-dataset"),
   compareModalClose: document.getElementById("compare-modal-close"),
   compareModalSections: document.getElementById("compare-modal-sections"),
   compareModalState: document.getElementById("compare-modal-state"),
@@ -3017,6 +3019,222 @@ function buildComparisonReportMarkdown() {
   return lines.join("\n");
 }
 
+function jsonNumberOrNull(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function jsonDatasetReplacer(_key, value) {
+  if (typeof value === "number" && !Number.isFinite(value)) return null;
+  if (value instanceof Set) return [...value];
+  return value;
+}
+
+function buildComparisonDatasetJson() {
+  const bfss = [...state.compareBfsOrder];
+  if (!bfss.length) return null;
+
+  const now = new Date();
+  const payload = currentPayload();
+  const coreData = buildSnapshotCoreComparisonData(bfss);
+  const weatherByBfs = compareWeatherSummaryByBfs(bfss);
+  const weatherFindings = buildWeatherSummaryFindings(bfss, weatherByBfs);
+  const selectedPanelId = String(state.compareModalSnapshotPanel || "swiss_ratio");
+  const selectedPanelTitle = snapshotPanelTitle(selectedPanelId);
+
+  const selectedIndicatorMeta = [...state.selectedClimateIndicators].map((key) => {
+    const option = (state.climateIndicatorOptions || []).find((item) => String(item?.key) === String(key));
+    return {
+      key: String(key),
+      label: option?.label ? String(option.label) : formatRawFieldLabel(key),
+      group: option?.group ? String(option.group) : null,
+      direction: option?.direction ? String(option.direction) : null,
+    };
+  });
+
+  const municipalities = bfss.map((bfs, idx) => {
+    const profile = compareProfileForBfs(bfs);
+    const weather = state.compareWeatherCache[bfs] || null;
+    const weatherSummary = weatherSummarySeries(weather);
+    const rec = state.records[bfs] || null;
+    const climateStatus = state.climateStageStatus[bfs] || "missing";
+    const weatherError = String(state.compareWeatherErrorByBfs[bfs] || "").trim();
+    const panelSeries = snapshotPanelSeries(selectedPanelId, profile?.snapshot || null);
+    return {
+      bfs: String(bfs),
+      order_index: idx,
+      identity: {
+        municipality_name: compareMunicipalityName(bfs),
+        canton_name: compareMunicipalityCanton(bfs) || null,
+      },
+      tags: {
+        building_material_zone: profile?.tags?.building_material_zone || null,
+        building_material_zone_number: jsonNumberOrNull(profile?.tags?.building_material_zone_number),
+        hearth_system_zone: profile?.tags?.hearth_system_zone || null,
+        hearth_system_zone_number: profile?.tags?.hearth_system_zone_number || null,
+        material_hearth_zone: profile?.tags?.material_hearth_zone || null,
+      },
+      analysis: {
+        bivariate_class: rec?.bi_class || null,
+        temperature_c: jsonNumberOrNull(rec?.temp),
+        old_buildings_pct: jsonNumberOrNull(rec?.pct_old1919),
+        climate_risk_score: jsonNumberOrNull(rec?.climate_risk_score),
+        exceptional_status: climateStatus,
+      },
+      weather_summary: {
+        station: weather?.station || null,
+        month_labels: MONTH_LABELS,
+        monthly: {
+          temp_mean_c: weatherSummary?.tempMean || [],
+          temp_min_c: weatherSummary?.tempMin || [],
+          temp_max_c: weatherSummary?.tempMax || [],
+          rh_median_pct: weatherSummary?.rhMedian || [],
+          ghi_total_proxy: weatherSummary?.ghiTotal || [],
+        },
+      },
+      selected_snapshot_panel: {
+        panel_id: selectedPanelId,
+        panel_title: selectedPanelTitle,
+        series: panelSeries || null,
+      },
+      availability: {
+        profile_available: !!profile,
+        weather_available: !!weather,
+        weather_error: weather ? null : (weatherError || null),
+      },
+      raw: {
+        municipality_profile: profile || null,
+        weather_payload: weather || null,
+        recompute_record: rec || null,
+      },
+    };
+  });
+
+  const coreMetricsMatrix = bfss.map((bfs) => ({
+    bfs: String(bfs),
+    municipality_name: compareMunicipalityName(bfs),
+    canton_name: compareMunicipalityCanton(bfs) || null,
+    bivariate_class: state.records[bfs]?.bi_class || null,
+    temperature_c: jsonNumberOrNull(state.records[bfs]?.temp),
+    old_buildings_pct: jsonNumberOrNull(state.records[bfs]?.pct_old1919),
+    climate_risk_score: jsonNumberOrNull(state.records[bfs]?.climate_risk_score),
+    exceptional_status: state.climateStageStatus[bfs] || "missing",
+  }));
+
+  const selectedSnapshotPanel = {
+    panel_id: selectedPanelId,
+    panel_title: selectedPanelTitle,
+    rows: bfss.map((bfs) => ({
+      bfs: String(bfs),
+      municipality_name: compareMunicipalityName(bfs),
+      series: snapshotPanelSeries(selectedPanelId, compareSnapshotForBfs(bfs)) || null,
+    })),
+  };
+
+  const keyFindings = [
+    ...(coreData.swissRatio.findings || []),
+    ...(coreData.ageDistribution.findings || []),
+    ...(coreData.constructionPeriod.findings || []),
+    ...(coreData.heatSource.findings || []),
+    ...(coreData.employment.findings || []),
+    ...weatherFindings,
+  ].filter(Boolean);
+
+  return {
+    schema_version: "comparison-dataset/v1",
+    generated_at: now.toISOString(),
+    descriptions: {
+      purpose: "Machine-readable municipality comparison dataset for downstream analysis workflows.",
+      scope: "Selected municipalities only (max 4), aligned to current in-session comparison order.",
+      processing: "Derived comparisons are computed client-side from in-memory profile, weather, and recompute data at export time.",
+      caveats: "Values reflect current map controls and current recompute state; they are not global static baselines.",
+    },
+    units_and_conventions: {
+      month_order: MONTH_LABELS,
+      temperature_unit: "degC",
+      percentages_unit: "percent",
+      climate_risk_score: "unitless minmax-normalized score",
+      weather_ghi_total_note: "Monthly total derived from EPW scatter values (W/m²-hour proxy aggregate).",
+    },
+    analysis_context: {
+      control_payload: payload,
+      selected_climate_indicators: selectedIndicatorMeta,
+      compare_order_bfs: bfss,
+      compare_max_municipalities: COMPARE_MAX_MUNICIPALITIES,
+      recompute_stats_snapshot: state.lastClimateStats || {},
+    },
+    municipalities,
+    derived_comparisons: {
+      core_metrics_matrix: coreMetricsMatrix,
+      snapshot_core_panels: coreData,
+      selected_snapshot_panel: selectedSnapshotPanel,
+      weather_monthly_summaries_by_bfs: weatherByBfs,
+      weather_findings: weatherFindings,
+      key_findings: keyFindings,
+    },
+    notes: {
+      climate_minmax_caveat:
+        "Because minmax normalization is domain-dependent, climate risk scores are relative to the active municipality analysis domain and can be stretched by extremes.",
+      interpretation:
+        "This dataset mixes raw endpoint payload mirrors and derived comparison outputs to support both reproducibility and downstream custom reporting.",
+    },
+  };
+}
+
+async function downloadComparisonDatasetJson() {
+  const bfss = [...state.compareBfsOrder];
+  if (!bfss.length) {
+    setStatus("No municipalities selected for comparison dataset.");
+    return;
+  }
+  if (state.compareDatasetExportBusy) return;
+
+  state.compareDatasetExportBusy = true;
+  if (state.compareModalOpen) renderCompareModal();
+  setStatus("Preparing comparison dataset JSON ...");
+
+  try {
+    await Promise.all(
+      bfss.map(async (bfs) => {
+        await Promise.allSettled([
+          ensureCompareProfileLoaded(bfs),
+          ensureCompareWeatherLoaded(bfs),
+        ]);
+      }),
+    );
+
+    const dataset = buildComparisonDatasetJson();
+    if (!dataset) {
+      setStatus("No municipalities selected for comparison dataset.");
+      return;
+    }
+
+    const stamp = reportTimestampStamp(new Date());
+    const season = String(el.season?.value || "annual");
+    const method = String(el.tempMethod?.value || "mean-range");
+    const filename = `municipality_comparison_${season}_${method}_${stamp}.json`;
+    const blob = new Blob(
+      [JSON.stringify(dataset, jsonDatasetReplacer, 2)],
+      { type: "application/json;charset=utf-8" },
+    );
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    setStatus(`Comparison dataset downloaded (${bfss.length} municipalities).`);
+  } catch (err) {
+    setStatus(`Error preparing comparison dataset: ${err?.message || err}`);
+    console.error(err);
+  } finally {
+    state.compareDatasetExportBusy = false;
+    if (state.compareModalOpen) renderCompareModal();
+  }
+}
+
 function downloadComparisonReport() {
   const markdown = buildComparisonReportMarkdown();
   if (!markdown) {
@@ -3088,11 +3306,19 @@ function renderCompareModal() {
   renderCompareModalSelectedStrip();
 
   const hasSelection = state.compareBfsOrder.length > 0;
+  const isDatasetExportBusy = !!state.compareDatasetExportBusy;
   if (el.compareModalReport) {
-    el.compareModalReport.disabled = !hasSelection;
+    el.compareModalReport.disabled = !hasSelection || isDatasetExportBusy;
+  }
+  if (el.compareModalDataset) {
+    el.compareModalDataset.disabled = !hasSelection || isDatasetExportBusy;
   }
   if (el.compareModalState) {
-    if (!hasSelection) {
+    if (isDatasetExportBusy) {
+      el.compareModalState.className = "compare-modal-state";
+      el.compareModalState.textContent = "Preparing comparison dataset JSON ...";
+      el.compareModalState.classList.remove("hidden");
+    } else if (!hasSelection) {
       el.compareModalState.className = "compare-modal-state";
       el.compareModalState.textContent = "No municipalities selected. Open a municipality profile and click Add to compare.";
       el.compareModalState.classList.remove("hidden");
@@ -3205,6 +3431,9 @@ function wireCompareModalEvents() {
 
   el.compareModalReport?.addEventListener("click", () => {
     downloadComparisonReport();
+  });
+  el.compareModalDataset?.addEventListener("click", () => {
+    downloadComparisonDatasetJson();
   });
 
   el.compareModalContent?.addEventListener("change", (event) => {

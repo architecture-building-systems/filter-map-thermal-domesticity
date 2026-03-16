@@ -1913,7 +1913,8 @@ body.modal-open {
   color: var(--muted);
 }
 
-#compare-modal-report:disabled {
+#compare-modal-report:disabled,
+#compare-modal-dataset:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }

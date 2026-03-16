@@ -10,7 +10,7 @@
   <link href="https://fonts.googleapis.com/css2?family=Comfortaa:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-  <link rel="stylesheet" href="{{ url_for('static', filename='app.css', v='20260315b') }}" />
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css', v='20260316a') }}" />
 </head>
 <body>
   <div id="app-loader" class="is-visible" role="status" aria-live="polite" aria-label="Application loading">
@@ -174,6 +174,9 @@
           <button id="compare-modal-report" class="field-option-action" type="button" aria-label="Download municipality comparison report">
             Download comparison report
           </button>
+          <button id="compare-modal-dataset" class="field-option-action" type="button" aria-label="Download municipality comparison dataset JSON">
+            Download comparison dataset (JSON)
+          </button>
           <button id="compare-modal-close" class="municipality-modal-close" type="button" aria-label="Close municipality comparison">
             ×
           </button>
@@ -188,6 +191,6 @@
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
-  <script src="{{ url_for('static', filename='app.js', v='20260315b') }}"></script>
+  <script src="{{ url_for('static', filename='app.js', v='20260316a') }}"></script>
 </body>
 </html>
